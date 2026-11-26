@@ -1,0 +1,68 @@
+---
+- name: Index artifacts
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  strategy: linear
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    ansible_connection: local
+    local_dir: /source
+  tasks:
+    - name: Index source files
+      software_manager:
+        operation: index
+        source: "{{ local_dir }}"
+      register: software_catalog
+      ignore_errors: true
+      tags: [always]
+
+- name: Manage Windows software
+  hosts: >-
+    {{ (lookup('ansible.builtin.env', 'SOFTWARE_MANAGER_TARGETS')
+        | default('["all", "localhost"]', true)) | from_json }}
+  gather_facts: false
+  strategy: free
+  vars:
+    local_dir: /source
+    state_db: "{{ software_patterns.dest }}\\_state\\state.json"
+    reboot_policy: manual
+  tasks:
+    - name: Process target Windows host
+      ansible.builtin.include_tasks:
+        file: task_windows.yaml
+      when:
+        - inventory_hostname != 'localhost'
+        - hostvars['localhost'].software_catalog is defined
+        - hostvars['localhost'].software_catalog is succeeded
+        - hostvars['localhost'].software_catalog.catalog is defined
+        - >-
+          (lookup('ansible.builtin.env', 'SOFTWARE_MANAGER_TARGETS') | length == 0)
+          or inventory_hostname in (lookup('ansible.builtin.env', 'SOFTWARE_MANAGER_TARGETS') | from_json)
+      tags: [always]
+
+- name: Final report
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  strategy: linear
+  vars:
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+    ansible_connection: local
+  tasks:
+    - name: Remove temporary controller metadata cache
+      ansible.builtin.file:
+        path: "{{ software_catalog.cache_dir }}"
+        state: absent
+      check_mode: false
+      when:
+        - software_catalog is defined
+        - software_catalog.cache_dir is defined
+        - software_catalog.cache_dir is match('^/[^\n]*/software-catalog-[A-Za-z0-9_]+$')
+      ignore_errors: true
+      tags: [always]
+
+    - name: Generate report and notification
+      ansible.builtin.include_tasks:
+        file: telegram.yaml
+      tags: [always]

@@ -1,0 +1,25 @@
+---
+- name: "Verify file operation result {{ software_index_label }}: {{ software_package_label }}"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+    parameters:
+      Operation: inspect
+      Paths: "{{ (software_effective_files + software_item.remove) | map(attribute='path') | list | unique | list }}"
+    error_action: stop
+  register: software_files_verified
+  check_mode: false
+  no_log: false
+  tags: [always]
+
+- name: "Validate manifest {{ software_index_label }}: {{ software_package_label }}"
+  software_manager:
+    operation: verify_files
+    item: "{{ software_item }}"
+    files: "{{ software_effective_files }}"
+    snapshot: "{{ software_files_verified.result }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  no_log: false
+  tags: [always]

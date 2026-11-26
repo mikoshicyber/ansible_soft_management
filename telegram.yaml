@@ -1,0 +1,196 @@
+---
+- name: Initialize final report
+  ansible.builtin.set_fact:
+    software_report: []
+    software_failed: >-
+      {{ software_catalog is not defined or software_catalog is failed
+         or software_catalog.catalog is not defined }}
+  tags: [always]
+
+- name: DEBUG report
+  ansible.builtin.debug:
+    msg: "{{ software_report | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Collect actual host results
+  ansible.builtin.set_fact:
+    software_report: "{{ software_report + [{'host': item, 'completed': (hostvars[item] | default({})).software_completed | default(false), 'results': (hostvars[item] | default({})).software_results | default([]), 'reboot_required': (hostvars[item] | default({})).software_reboot_required | default(false)}] }}"
+  loop: >-
+    {{ ((lookup('ansible.builtin.env', 'SOFTWARE_MANAGER_TARGETS') | from_json)
+        if lookup('ansible.builtin.env', 'SOFTWARE_MANAGER_TARGETS') | length > 0
+        else groups['all'])
+       | reject('equalto', 'localhost') | list }}
+  when: >-
+    (lookup('ansible.builtin.env', 'SOFTWARE_MANAGER_TARGETS') | length > 0)
+    or ((hostvars[item] | default({})).software_started | default(false))
+  tags: [always]
+
+- name: DEBUG collected results
+  ansible.builtin.debug:
+    msg: "{{ software_report | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Build messages and status
+  ansible.builtin.set_fact:
+    software_failed: "{{ software_failed or not item.completed or (item.results | rejectattr('status', 'defined') | list | length > 0) or (item.results | selectattr('status', 'defined') | selectattr('status', 'equalto', 'error') | list | length > 0) }}"
+  loop: "{{ software_report }}"
+  loop_control:
+    label: "{{ item.host }}"
+  tags: [always]
+
+- name: DEBUG report status
+  ansible.builtin.debug:
+    msg: "{{ software_failed }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Show final report
+  ansible.builtin.debug:
+    var: software_report
+  tags: [always]
+
+- name: Prepare notifications
+  ansible.builtin.set_fact:
+    software_notifications: >-
+      {%- set report = namespace(lines=[], parts=[], part='') -%}
+      {%- set report.lines = [('b', 'Updates completed' ~ (' with errors' if software_failed else ''))] -%}
+      {%- if software_catalog is not defined or software_catalog is failed or software_catalog.catalog is not defined -%}
+        {%- set report.lines = report.lines + [('', 'Failed to prepare local catalog.')] -%}
+      {%- endif -%}
+      {%- if not software_report -%}
+        {%- set report.lines = report.lines + [('', 'No Windows host results.')] -%}
+      {%- endif -%}
+      {%- for host in software_report -%}
+        {%- if host.results or not host.completed or host.reboot_required -%}
+        {%- set report.lines = report.lines + [('b:', host.host)] -%}
+        {%- if not host.completed -%}
+          {%- set report.lines = report.lines + [('', 'Processing incomplete.')] -%}
+        {%- endif -%}
+        {%- set sections = namespace(installed=[], removed=[], warnings=[], errors=[], other=[]) -%}
+        {%- for result in host.results -%}
+          {%- set status = result.status | default('error') -%}
+          {%- set action = result.action | default('plan') -%}
+          {%- set line = '• ' ~ (result.filename | default(result.id)) -%}
+          {%- if status in ['error', 'warning'] and result.reason is defined -%}
+            {%- set line = line ~ ' — ' ~ result.reason -%}
+          {%- endif -%}
+          {%- if status == 'error' -%}
+            {%- set sections.errors = sections.errors + [line] -%}
+          {%- elif status == 'warning' -%}
+            {%- set sections.warnings = sections.warnings + [line] -%}
+          {%- elif status in ['ok', 'unverified', 'installer_reported'] and action in ['remove', 'uninstall', 'remove_files'] -%}
+            {%- set sections.removed = sections.removed + [line] -%}
+          {%- elif status in ['ok', 'unverified', 'installer_reported'] and action in ['install', 'upgrade', 'update_files', 'recover'] -%}
+            {%- set sections.installed = sections.installed + [line] -%}
+          {%- else -%}
+            {%- set sections.other = sections.other + [line ~ ' (' ~ action ~ ' / ' ~ status ~ ')'] -%}
+          {%- endif -%}
+        {%- endfor -%}
+        {%- for title, lines in [('Installed/updated', sections.installed), ('Removed', sections.removed), ('Warnings', sections.warnings), ('Errors', sections.errors), ('Other results', sections.other)] if lines -%}
+          {%- set report.lines = report.lines + [('i:', title)] -%}
+          {%- for line in lines -%}
+            {%- set report.lines = report.lines + [('', line)] -%}
+          {%- endfor -%}
+        {%- endfor -%}
+        {%- if host.reboot_required -%}
+          {%- set report.lines = report.lines + [('', 'Reboot required.')] -%}
+        {%- endif -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {%- if report.lines | length == 1 -%}
+        {%- set report.lines = report.lines + [('', 'No changes.')] -%}
+      {%- endif -%}
+      {%- for style, line in report.lines -%}
+        {%- for fragment in (line | regex_findall('(?s).{1,280}')) or [''] -%}
+          {%- set escaped = fragment | replace('&', '&amp;') | replace('<', '&lt;') | replace('>', '&gt;') -%}
+          {%- set tag = style | replace(':', '') -%}
+          {%- set chunk = ('<' ~ tag ~ '>' ~ escaped ~ '</' ~ tag ~ '>' if tag else escaped) ~ (':' if loop.last and style.endswith(':') else '') ~ ('\n' if loop.last else '') -%}
+          {%- if report.part | length + chunk | length > 1800 -%}
+            {%- set report.parts = report.parts + [report.part] -%}
+            {%- set report.part = '' -%}
+          {%- endif -%}
+          {%- set report.part = report.part ~ chunk -%}
+        {%- endfor -%}
+      {%- endfor -%}
+      {{- report.parts + ([report.part] if report.part else []) -}}
+  tags: [always]
+
+- name: DEBUG message count
+  ansible.builtin.debug:
+    msg: "{{ software_notifications | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Send final report to Telegram
+  vars:
+    software_telegram_token: >-
+      {{ (lookup('ansible.builtin.env', 'TELEGRAM_BOT_TOKEN') | trim)
+         | default(lookup('ansible.builtin.env', 'TELEGRAM_TOKEN') | trim, true)
+         | default(telegram_bot_token | default('', true) | string | trim, true)
+         | default(telegram_token | default('', true) | string | trim, true) }}
+    software_telegram_chat: >-
+      {{ (lookup('ansible.builtin.env', 'TELEGRAM_CHAT_ID') | trim)
+         | default(telegram_chat_id | default('', true) | string | trim, true) }}
+    software_telegram_proxy: >-
+      {{ (lookup('ansible.builtin.env', 'TELEGRAM_HTTPS_PROXY') | trim)
+         | default(telegram_https_proxy | default('', true) | string | trim, true) }}
+  block:
+    - name: Report missing Telegram settings
+      ansible.builtin.debug:
+        msg: 'Telegram: report not sent. Set TELEGRAM_BOT_TOKEN (or telegram_token) and TELEGRAM_CHAT_ID (or telegram_chat_id).'
+      when: software_telegram_token | string | length == 0 or software_telegram_chat | string | length == 0
+      tags: [always]
+
+    - name: Send notifications
+      community.general.telegram:
+        token: "{{ software_telegram_token }}"
+        api_method: sendMessage
+        api_args:
+          chat_id: "{{ software_telegram_chat }}"
+          text: |-
+            {% if software_notifications | length > 1 %}
+            Part {{ software_notification_index + 1 }}/{{ software_notifications | length }}
+            {% endif %}
+            {{ item | trim }}
+          parse_mode: HTML
+          disable_notification: true
+          link_preview_options:
+            is_disabled: true
+      environment: "{{ {'https_proxy': software_telegram_proxy, 'HTTPS_PROXY': software_telegram_proxy} if software_telegram_proxy | string | length > 0 else {} }}"
+      loop: "{{ software_notifications }}"
+      loop_control:
+        index_var: software_notification_index
+        pause: 1
+      when:
+        - software_telegram_token | string | length > 0
+        - software_telegram_chat | string | length > 0
+      no_log: true
+      register: software_telegram_result
+      ignore_errors: true
+      tags: [always]
+
+    - name: Report notification problems
+      ansible.builtin.debug:
+        msg: 'Telegram: some notifications were not sent. Check the token, chat_id, bot permissions and API access. Operation results have been preserved.'
+      when: software_telegram_result is failed
+      tags: [always]
+
+    - name: Confirm report delivery
+      ansible.builtin.debug:
+        msg: "Telegram: messages sent — {{ software_notifications | length }}."
+      when:
+        - software_telegram_result is succeeded
+        - software_telegram_result is not skipped
+      tags: [always]
+  when:
+    - not ansible_check_mode
+    - not (software_metadata_only | default(false) | bool)
+  tags: [always]
+
+- name: Return non-zero status on errors
+  ansible.builtin.fail:
+    msg: 'Not all software management operations completed successfully (including local catalog preparation).'
+  when: software_failed
+  tags: [always]

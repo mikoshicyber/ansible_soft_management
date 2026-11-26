@@ -1,0 +1,35 @@
+---
+- name: "Check installer cache path {{ software_index_label }}: {{ software_package_label }}"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+    parameters:
+      Operation: guard
+      Paths: "{{ [software_item.cache_path] + ([software_item.cache_path ~ '.log'] if software_item.pattern.mode == 'msi' else []) }}"
+    error_action: stop
+  tags: [always]
+
+- name: "Create installer directory {{ software_index_label }}: {{ software_package_label }}"
+  ansible.windows.win_file:
+    path: "{{ software_item.cache_path | win_dirname }}"
+    state: directory
+  when: software_batch_copy is not defined or software_batch_copy is failed or software_batch_copy is skipped
+  tags: [always]
+
+- name: "Copy installer {{ software_index_label }}: {{ software_package_label }}"
+  ansible.windows.win_copy:
+    src: "{{ software_item.artifact.source }}"
+    dest: "{{ software_item.cache_path }}"
+    force: true
+  when: software_batch_copy is not defined or software_batch_copy is failed or software_batch_copy is skipped
+  tags: [always]
+
+- name: "Verify installer checksum and signature {{ software_index_label }}: {{ software_package_label }}"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/package_guard.ps1', rstrip=false) }}"
+    parameters:
+      Path: "{{ software_item.cache_path }}"
+      Checksum: "{{ software_item.artifact.checksum }}"
+      VerifySignature: "{{ software_item.pattern.verify_signature }}"
+    error_action: stop
+  when: software_item.pattern.mode == 'msi' or software_item.pattern.verify_signature
+  tags: [always]

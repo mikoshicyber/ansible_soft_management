@@ -1,0 +1,58 @@
+---
+- name: "Prepare templates and checksums {{ software_index_label }}: {{ software_package_label }}"
+  ansible.builtin.set_fact:
+    software_effective_files: "{{ software_effective_files | rejectattr('path', 'equalto', software_file.path) | list + [software_file | combine({'content_b64': software_rendered | b64encode, 'checksum': software_rendered | hash('sha256')})] }}"
+  vars:
+    software_rendered: "{{ lookup('ansible.builtin.template', software_file.source, convert_data=false) | string }}"
+  loop: "{{ software_item.files }}"
+  loop_control:
+    loop_var: software_file
+  when:
+    - software_item.pattern.mode == 'files'
+    - software_item.pattern.template
+    - software_item.pattern.state == 'present'
+  no_log: false
+  tags: [always]
+
+- name: "DEBUG file preparation {{ software_index_label }}: {{ software_package_label }}"
+  ansible.builtin.debug:
+    msg: "{{ software_effective_files | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: "Check managed paths and contents {{ software_index_label }}: {{ software_package_label }}"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+    parameters:
+      Operation: inspect
+      Paths: "{{ (software_effective_files + software_item.remove) | map(attribute='path') | list | unique | list }}"
+    error_action: stop
+  register: software_file_snapshot
+  check_mode: false
+  no_log: false
+  tags: [always]
+
+- name: "Compare manifest {{ software_index_label }}: {{ software_package_label }}"
+  software_manager:
+    operation: plan_files
+    item: "{{ software_item }}"
+    files: "{{ software_effective_files }}"
+    snapshot: "{{ software_file_snapshot.result }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  register: software_file_plan
+  no_log: false
+  tags: [always]
+
+- name: "Determine final file operation {{ software_index_label }}: {{ software_package_label }}"
+  ansible.builtin.set_fact:
+    software_action: "{{ software_file_plan.action }}"
+  tags: [always]
+
+- name: "DEBUG file operation result {{ software_index_label }}: {{ software_package_label }}"
+  ansible.builtin.debug:
+    msg: "{{ software_action }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]

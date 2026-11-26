@@ -1,0 +1,30 @@
+---
+- name: "Refresh installed software information {{ software_index_label }}: {{ software_package_label }}"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/installed_software.ps1', rstrip=false) }}"
+    parameters:
+      ProbePaths: "{{ [software_item.pattern.creates_path] if software_item.pattern.creates_path is defined else [] }}"
+      MsiMetadata: "{{ {'target': software_item.artifact.msi_metadata} if software_item.artifact.msi_metadata is defined else {} }}"
+      MsiIdentities: "{{ {'target': software_item.msi_identity} if software_item.msi_identity is defined else {} }}"
+      NativeOnly: "{{ (software_item.artifact.msi_metadata is defined or software_item.msi_identity is defined) | bool }}"
+      ProductIds: "{{ [software_item.pattern.product_id] if (software_item.pattern.product_id is defined and software_item.pattern.name is not defined and software_item.pattern.uninstall_name_regex is not defined) else [] }}"
+    error_action: stop
+  register: software_verify_snapshot
+  no_log: false
+  check_mode: false
+  when: software_item.pattern.state == 'absent'
+  tags: [always]
+
+- name: "Verify package result {{ software_index_label }}: {{ software_package_label }}"
+  software_manager:
+    operation: verify
+    item: "{{ software_item }}"
+    snapshot: "{{ software_verify_snapshot.result | default({}) }}"
+    receipt: "{{ software_pkg_install if software_action != 'recover' else {} }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  register: software_verified
+  no_log: false
+  tags: [always]

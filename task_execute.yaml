@@ -1,0 +1,317 @@
+---
+- name: "{{ software_index_label }} | {{ software_item.action }}: {{ software_package_label }}"
+  ansible.builtin.set_fact:
+    software_effective_files: "{{ software_item.files }}"
+    software_item_reboot: "{{ software_item.old.reboot_required | default(false) if software_item.action == 'recover' else false }}"
+    software_prepared: {}
+    software_verified: {}
+    software_pkg_install: {}
+    software_pkg_remove: {}
+    software_run_operation: false
+    software_run_hooks: false
+    software_run_pre: false
+    software_action: "{{ software_item.action }}"
+  no_log: false
+  tags: [always]
+
+- name: "DEBUG operation {{ software_index_label }}: {{ software_package_label }}"
+  ansible.builtin.debug:
+    msg: "{{ software_item.id }} / {{ software_action }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: "Process product {{ software_index_label }}: {{ software_package_label }}"
+  vars:
+    software_package_timeout_seconds: "{{ software_item.pattern.package_timeout | default(software_package_timeout | default(900)) }}"
+    software_hook_timeout_seconds: "{{ software_item.pattern.hook_timeout | default(software_hook_timeout | default(120)) }}"
+  block:
+    - name: "Validate installer timeout {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.assert:
+        that:
+          - (software_package_timeout_seconds | string) is match('^[0-9]+$')
+          - (software_package_timeout_seconds | int) >= 5
+          - (software_package_timeout_seconds | int) <= 86400
+        fail_msg: 'package_timeout / software_package_timeout must be an integer between 5 and 86400 seconds.'
+      when: software_action in ['install', 'upgrade', 'remove']
+      tags: [always]
+
+    - name: "Determine file changes {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.include_tasks:
+        file: task_file_plan.yaml
+      when: software_item.pattern.mode in ['arc', 'files']
+      tags: [always]
+
+    - name: "Resolve operation {{ software_index_label }} | {{ software_action }}: {{ software_package_label }}"
+      ansible.builtin.set_fact:
+        software_run_operation: "{{ software_action in ['install', 'upgrade', 'remove', 'update_files'] }}"
+        software_run_hooks: "{{ software_action in ['install', 'upgrade', 'remove', 'update_files', 'recover'] }}"
+        software_run_pre: "{{ (software_file_plan.run_pre | default(false) if software_item.pattern.mode in ['arc', 'files'] else software_item.run_pre | default(false)) | bool }}"
+      changed_when: ansible_check_mode and software_action in ['install', 'upgrade', 'remove', 'update_files', 'recover']
+      tags: [always]
+
+    - name: "DEBUG decision {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.debug:
+        msg: "{{ software_action }}"
+      when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+      tags: [never, debug]
+
+    - name: "Validate PRE/POST timeout {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.assert:
+        that:
+          - (software_hook_timeout_seconds | string) is match('^[0-9]+$')
+          - (software_hook_timeout_seconds | int) >= 5
+          - (software_hook_timeout_seconds | int) <= 86400
+        fail_msg: 'hook_timeout / software_hook_timeout must be an integer between 5 and 86400 seconds.'
+      when: (software_run_pre | bool and software_item.pattern.pre | length > 0) or (software_run_hooks | bool and software_item.pattern.post | length > 0)
+      tags: [always]
+
+    - name: "Apply planned changes {{ software_index_label }}: {{ software_package_label }}"
+      when: not ansible_check_mode and software_action != 'skip'
+      block:
+        - name: "Prepare archive before PRE {{ software_index_label }}: {{ software_package_label }}"
+          software_manager:
+            operation: prepare
+            item: "{{ software_item }}"
+            source: "{{ local_dir }}"
+            cache_dir: "{{ hostvars['localhost'].software_catalog.cache_dir }}"
+          delegate_to: localhost
+          vars:
+            ansible_connection: local
+            ansible_python_interpreter: "{{ ansible_playbook_python }}"
+          register: software_prepared
+          when: software_action == 'update_files' and software_item.pattern.mode == 'arc' and software_item.pattern.state == 'present'
+          no_log: false
+          tags: [always]
+
+        - name: "Use prepared archive files {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.set_fact:
+            software_effective_files: "{{ software_prepared.files }}"
+          when: software_prepared.files is defined
+          no_log: false
+          tags: [always]
+
+        - name: "DEBUG preparation {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.debug:
+            msg: "{{ software_effective_files | length }}"
+          when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+          tags: [never, debug]
+
+        - name: "Prepare installer before PRE {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.include_tasks:
+            file: task_package_prepare.yaml
+          when: software_action in ['install', 'upgrade']
+          tags: [always]
+
+        - name: "Record pending operation {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.include_tasks:
+            file: task_state.yaml
+          vars:
+            software_phase: pending
+          when: software_run_operation
+          tags: [always]
+
+        - name: "Run PRE commands {{ software_index_label }}: {{ software_package_label }}"
+          ansible.windows.win_shell: >-
+            {{ ("$image = '" ~ software_command.image ~ "';\n" ~ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/stop_process.ps1', rstrip=false))
+                if software_command.kind == 'process' else software_command.command }}
+          args:
+            executable: "{{ 'powershell' if software_command.kind == 'process' else 'cmd.exe' }}"
+            no_profile: "{{ software_command.kind == 'process' }}"
+          loop: "{{ software_item.pattern.pre_commands }}"
+          loop_control:
+            loop_var: software_command
+            label: "{{ software_command.command }}"
+          register: software_pre_result
+          timeout: "{{ software_hook_timeout_seconds | int }}"
+          failed_when: >-
+            software_pre_result.rc is not defined or
+            (software_pre_result.rc | int != 0 and
+             (software_command.kind != 'service' or software_pre_result.stdout is not defined or
+              software_pre_result.rc | int not in software_command.accepted_rc))
+          changed_when: >-
+            software_pre_result.rc | default(-1) | int == 0 and
+            not (software_command.kind == 'process' and software_pre_result.stdout | default('') | trim == 'SOFTWARE_MANAGER_NO_PROCESS')
+          when:
+            - not ansible_check_mode
+            - software_run_pre | bool
+          no_log: false
+          tags: [always]
+
+        - name: "Install or remove package {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.include_tasks:
+            file: task_package.yaml
+          when: software_action in ['install', 'upgrade', 'remove']
+          tags: [always]
+
+        - name: "Update managed files {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.include_tasks:
+            file: task_files.yaml
+          when: software_action == 'update_files'
+          tags: [always]
+
+        - name: "Record completion of main operation {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.include_tasks:
+            file: task_state.yaml
+          vars:
+            software_phase: post
+          when:
+            - software_run_operation
+            - >-
+              software_action not in ['install', 'upgrade'] or
+              software_item.pattern.mode not in ['exe', 'msi'] or
+              software_item.pattern.post | length > 0
+          tags: [always]
+
+        - name: "Run POST commands {{ software_index_label }}: {{ software_package_label }}"
+          ansible.windows.win_shell: >-
+            {{ ("$image = '" ~ software_command.image ~ "';\n" ~ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/stop_process.ps1', rstrip=false))
+                if software_command.kind == 'process' else software_command.command }}
+          args:
+            executable: "{{ 'powershell' if software_command.kind == 'process' else 'cmd.exe' }}"
+            no_profile: "{{ software_command.kind == 'process' }}"
+          loop: "{{ software_item.pattern.post_commands }}"
+          loop_control:
+            loop_var: software_command
+            label: "{{ software_command.command }}"
+          register: software_post_result
+          timeout: "{{ software_hook_timeout_seconds | int }}"
+          failed_when: >-
+            software_post_result.rc is not defined or
+            (software_post_result.rc | int != 0 and
+             (software_command.kind != 'service' or software_post_result.stdout is not defined or
+              software_post_result.rc | int not in software_command.accepted_rc))
+          changed_when: >-
+            software_post_result.rc | default(-1) | int == 0 and
+            not (software_command.kind == 'process' and software_post_result.stdout | default('') | trim == 'SOFTWARE_MANAGER_NO_PROCESS')
+          when: software_run_hooks
+          no_log: false
+          tags: [always]
+
+        - name: "Verify package after execution {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.include_tasks:
+            file: task_verify.yaml
+          when: software_item.pattern.mode in ['exe', 'msi']
+          tags: [always]
+
+        - name: "Verify managed files after execution {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.include_tasks:
+            file: task_file_verify.yaml
+          when: software_item.pattern.mode in ['arc', 'files']
+          tags: [always]
+
+        - name: "Record verified result {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.include_tasks:
+            file: task_state.yaml
+          vars:
+            software_phase: done
+          tags: [always]
+
+        - name: "Clean installer cache {{ software_index_label }}: {{ software_package_label }}"
+          ansible.windows.win_powershell:
+            script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+            parameters:
+              Operation: cleanup_package
+              ManagedRoot: "{{ dest }}"
+              Paths: ["{{ software_item.cache_path }}"]
+              ExpectedHashes: "{{ {software_item.cache_path: software_item.artifact.checksum} }}"
+            error_action: stop
+          when: software_action in ['install', 'upgrade', 'recover'] and software_item.cache_path is defined
+          register: software_package_cleanup
+          ignore_errors: true
+          tags: [always]
+
+        - name: "Installer cache cleanup warning {{ software_index_label }}: {{ software_package_label }}"
+          ansible.builtin.debug:
+            msg: >-
+              WARNING: Failed to fully clean installer cache for {{ software_package_label }}.
+              {{ software_package_cleanup.msg | default((software_package_cleanup.error | default([]) | map(attribute='output', default='') | join(' ')), true) }}
+          when: software_package_cleanup is failed
+          tags: [always]
+
+    - name: "Track reboot requirement after recovery {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.set_fact:
+        software_reboot_required: "{{ software_reboot_required or software_item_reboot }}"
+      when: not ansible_check_mode and software_action == 'recover'
+      tags: [always]
+
+    - name: "DEBUG reboot after recovery {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.debug:
+        msg: "{{ software_reboot_required }}"
+      when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+      tags: [never, debug]
+
+    - name: "Record product result {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.set_fact:
+        software_results: "{{ software_results + [{'id': software_item.id, 'status': ('planned' if ansible_check_mode else ('unverified' if software_verified.verification | default(software_item.verification | default('')) == 'installer_result' else 'ok')), 'action': software_action, 'verification': software_verified.verification | default(software_item.verification | default('installed_state' if software_item.pattern.mode in ['exe', 'msi'] else 'file_manifest')), 'filename': software_item.artifact.filename | default((software_item.installed | default({})).name | default(software_item.id)), 'installed_version': software_verified.installed_version | default(none), 'reboot_required': software_item_reboot}] }}"
+      when: software_action != 'skip'
+      tags: [always]
+
+    - name: "DEBUG result {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.debug:
+        msg: "{{ software_results | length }}"
+      when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+      tags: [never, debug]
+
+  rescue:
+    - name: "Record product error {{ software_index_label }}: {{ software_package_label }}"
+      vars:
+        software_failure: >-
+          {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | list | first)
+             | default(ansible_failed_result | default({})) }}
+        software_failed_package_timeout: >-
+          {{ (ansible_failed_task.action | default('')) in
+             ['ansible.windows.win_package', 'win_package', 'ansible.windows.win_command', 'win_command']
+             and (ansible_failed_result.timedout is defined
+                  or ((ansible_failed_result.msg | default('') | string) is search('action failed to execute in the expected time frame', ignorecase=true))) }}
+        software_failed_hook_timeout: >-
+          {{ (ansible_failed_task.action | default('')) in ['ansible.windows.win_shell', 'win_shell']
+             and (software_failure.timedout is defined or ansible_failed_result.timedout is defined
+                  or ((software_failure.msg | default(ansible_failed_result.msg | default('')) | string) is search('action failed to execute in the expected time frame', ignorecase=true))) }}
+        software_error_reason: >-
+          {{ ('package timeout (' ~ (software_package_timeout_seconds | string) ~ ' s)') if software_failed_package_timeout | bool else
+             ('hook timeout (' ~ (software_hook_timeout_seconds | string) ~ ' s)') if software_failed_hook_timeout | bool else
+             (ansible_failed_task.name | default('unknown')) ~
+             ('; rc=' ~ (software_failure.rc | string) if software_failure.rc is defined else '') ~
+             ('; ' ~ (software_failure.msg | default('') | string | truncate(300, true, '...')) if software_failure.msg | default('') else '') ~
+             ('; ' ~ ((software_failure.stderr | default('', true) or software_failure.stdout | default('', true)) | trim | truncate(300, true, '...'))
+              if (software_failure.software_command | default({})).kind | default('') in ['service', 'process'] and
+                 (software_failure.stderr | default('', true) or software_failure.stdout | default('', true)) else '') }}
+      ansible.builtin.set_fact:
+        software_reboot_deferred: "{{ (software_reboot_deferred | default(false)) or (software_failed_package_timeout | bool) or (software_failed_hook_timeout | bool) or ((ansible_failed_task.action | default('')) in ['ansible.windows.win_package', 'win_package', 'ansible.windows.win_command', 'win_command'] and (software_item.pattern.mode == 'msi' or (software_item.installed | default({})).provider | default('') == 'msi') and (software_failure.rc | default(-1) | int) == 1618) }}"
+        software_results: "{{ software_results + [{'id': software_item.id, 'status': 'error', 'action': software_action, 'filename': (software_item.artifact | default({})).filename | default((software_item.installed | default({})).name | default(software_item.id), true), 'reason': software_error_reason, 'timed_out': (software_failed_package_timeout | bool or software_failed_hook_timeout | bool)}] }}"
+      tags: [always]
+
+    - name: "DEBUG error {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.debug:
+        msg: "{{ software_item.id }}: {{ ansible_failed_task.name | default('unknown') }}"
+      when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+      tags: [never, debug]
+
+  always:
+    - name: "Clean temporary extracted files {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.file:
+        path: "{{ software_prepared.directory }}"
+        state: absent
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      when:
+        - not ansible_check_mode
+        - software_prepared.directory is defined
+        - software_prepared.directory is match('^/[^\n]*/software-manager-[A-Za-z0-9_]+$')
+      register: software_cleanup
+      ignore_errors: true
+      tags: [always]
+
+    - name: "Temporary extraction cleanup warning {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.debug:
+        msg: "WARNING: Failed to clean temporary extracted files for {{ software_package_label }}. {{ software_cleanup.msg | default('') }}"
+      when: software_cleanup is failed
+      tags: [always]
+
+    - name: "DEBUG cleanup {{ software_index_label }}: {{ software_package_label }}"
+      ansible.builtin.debug:
+        msg: "{{ software_cleanup is failed }}"
+      when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+      tags: [never, debug]

@@ -1,0 +1,325 @@
+---
+- name: Initialize results
+  ansible.builtin.set_fact:
+    software_started: true
+    software_completed: false
+    software_results: []
+    software_reboot_required: false
+    software_reboot_deferred: false
+  tags: [always]
+
+- name: DEBUG initialization
+  ansible.builtin.debug:
+    msg: "{{ software_started }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Validate catalog availability and run parameters
+  ansible.builtin.assert:
+    that:
+      - hostvars['localhost'].software_catalog is defined
+      - hostvars['localhost'].software_catalog.catalog is defined
+      - reboot_policy in ['manual', 'end']
+      - dest is defined
+      - not (software_metadata_only | default(false) | bool)
+    fail_msg: 'A localhost catalog, dest and a valid reboot_policy are required. Use run.sh to limit hosts. software_metadata_only has been removed; use --check.'
+  tags: [always]
+
+- name: Build global settings
+  ansible.builtin.set_fact:
+    software_layers: "{{ [{'scope': 'all', 'patterns': lookup('ansible.builtin.vars', 'patterns__all', default=[])}] }}"
+  no_log: false
+  tags: [always]
+
+- name: DEBUG global settings
+  ansible.builtin.debug:
+    msg: "{{ software_layers | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Add group settings
+  ansible.builtin.set_fact:
+    software_layers: "{{ software_layers + [{'scope': 'group', 'patterns': lookup('ansible.builtin.vars', 'patterns__' ~ item, default=[])}] }}"
+  loop: "{{ group_names | difference(['all', 'ungrouped']) | sort }}"
+  no_log: false
+  tags: [always]
+
+- name: DEBUG group settings
+  ansible.builtin.debug:
+    msg: "{{ software_layers | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Add host settings
+  ansible.builtin.set_fact:
+    software_layers: "{{ software_layers + [{'scope': 'host', 'patterns': lookup('ansible.builtin.vars', 'patterns__' ~ inventory_hostname, default=[])}] }}"
+  no_log: false
+  tags: [always]
+
+- name: DEBUG host settings
+  ansible.builtin.debug:
+    msg: "{{ software_layers | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Validate and merge patterns
+  software_manager:
+    operation: normalize
+    layers: "{{ software_layers }}"
+    identity_overrides: "{{ software_identity_overrides | default({}) }}"
+    dest: "{{ dest }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  register: software_patterns
+  no_log: false
+  tags: [always]
+
+- name: Read state database
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+    parameters:
+      Operation: read
+      StatePath: "{{ state_db }}"
+    error_action: stop
+  register: software_state_raw
+  check_mode: false
+  no_log: false
+  tags: [always]
+
+- name: Read MSI metadata on controller
+  software_manager:
+    operation: discover_msi
+    source: "{{ local_dir }}"
+    patterns: "{{ software_patterns.patterns }}"
+    catalog: "{{ hostvars['localhost'].software_catalog.catalog }}"
+    cache_dir: "{{ hostvars['localhost'].software_catalog.cache_dir }}"
+    state: "{{ software_state_raw.result.content_b64 | b64decode }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  register: software_msi_catalog
+  no_log: false
+  tags: [always]
+
+- name: Discover installed software
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/installed_software.ps1', rstrip=false) }}"
+    parameters:
+      ProbePaths: "{{ software_patterns.patterns | selectattr('creates_path', 'defined') | map(attribute='creates_path') | list | unique | list }}"
+      MsiMetadata: {}
+      MsiIdentities: "{{ software_msi_catalog.identities }}"
+    error_action: stop
+  register: software_snapshot
+  when: software_patterns.patterns | selectattr('state', 'equalto', 'absent') | selectattr('mode', 'in', ['exe', 'msi']) | list | length > 0
+  check_mode: false
+  no_log: false
+  tags: [always]
+
+- name: Build host-specific plan
+  software_manager:
+    operation: plan
+    source: "{{ local_dir }}"
+    dest: "{{ dest }}"
+    patterns: "{{ software_patterns.patterns }}"
+    catalog: "{{ hostvars['localhost'].software_catalog.catalog }}"
+    snapshot: "{{ (software_snapshot.result | default({'installed': [], 'probes': {}})) | combine({'msi_metadata': software_msi_catalog.metadata, 'local_msi_errors': software_msi_catalog.errors}) }}"
+    cache_dir: "{{ hostvars['localhost'].software_catalog.cache_dir }}"
+    state: "{{ software_state_raw.result.content_b64 | b64decode }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  register: software_plan
+  no_log: false
+  tags: [always]
+
+- name: Initialize state and planning errors
+  ansible.builtin.set_fact:
+    software_database: "{{ software_plan.database }}"
+    software_state_current: "{{ software_state_raw.result }}"
+    software_results: "{{ (software_plan.errors | list) + (software_plan.blocked | default([])) + (software_plan.plan_warnings | default([])) }}"
+  no_log: false
+  tags: [always]
+
+- name: DEBUG plan
+  ansible.builtin.debug:
+    msg:
+      operations: "{{ software_plan.operations | length }}"
+      skipped: "{{ software_plan.skipped | length }}"
+      errors: "{{ software_plan.errors | length }}"
+      blocked: "{{ software_plan.blocked | default([]) | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Validate plan before modifying Windows
+  ansible.builtin.assert:
+    that: software_plan.errors | length == 0
+    fail_msg: 'Planning errors: {{ software_plan.errors | map(attribute="id") | join(", ") }}. Changes are blocked.'
+  tags: [always]
+
+- name: Refresh artifact versions with unchanged SHA-256
+  vars:
+    software_refreshed_database: "{{ software_database | combine({'products': software_database.products | combine(software_plan.state_refresh)}) }}"
+    ansible_no_target_syslog: true
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+    parameters:
+      Operation: write
+      StatePath: "{{ state_db }}"
+      Content: "{{ software_refreshed_database | to_nice_json(indent=2, sort_keys=true, ensure_ascii=false) | b64encode }}"
+      ExpectedContent: "{{ software_state_current.content_b64 }}"
+      ExpectedExists: "{{ software_state_current.exists }}"
+    error_action: stop
+  register: software_refresh_result
+  when:
+    - not ansible_check_mode
+    - software_plan.state_refresh | default({}) | length > 0
+  no_log: false
+  tags: [always]
+
+- name: Synchronize refreshed versions
+  vars:
+    software_refreshed_database: "{{ software_database | combine({'products': software_database.products | combine(software_plan.state_refresh)}) }}"
+  ansible.builtin.set_fact:
+    software_database: "{{ software_refreshed_database }}"
+    software_state_current:
+      exists: true
+      content_b64: "{{ software_refreshed_database | to_nice_json(indent=2, sort_keys=true, ensure_ascii=false) | b64encode }}"
+  when:
+    - software_refresh_result is succeeded
+    - software_refresh_result is not skipped
+  no_log: false
+  tags: [always]
+
+- name: DEBUG version refresh
+  ansible.builtin.debug:
+    msg: "{{ software_plan.state_refresh | default({}) | length }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: "Prepare batch installer transfer ({{ software_plan.operations | selectattr('action', 'in', ['install', 'upgrade']) | list | length }} items)"
+  software_manager:
+    operation: stage_packages
+    operations: "{{ software_plan.operations }}"
+    source: "{{ local_dir }}"
+    dest: "{{ dest }}"
+    cache_dir: "{{ hostvars['localhost'].software_catalog.cache_dir }}"
+  delegate_to: localhost
+  vars:
+    ansible_connection: local
+    ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  register: software_package_batch
+  when:
+    - not ansible_check_mode
+    - software_plan.operations | selectattr('action', 'in', ['install', 'upgrade']) | list | length > 0
+  ignore_errors: true
+  no_log: false
+  tags: [always]
+
+- name: "Check batch transfer paths ({{ software_plan.operations | selectattr('action', 'in', ['install', 'upgrade']) | list | length }} items)"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+    parameters:
+      Operation: guard
+      Paths: "{{ software_package_batch.paths }}"
+    error_action: stop
+  register: software_batch_guard
+  when:
+    - not ansible_check_mode
+    - software_package_batch.paths | default([]) | length > 0
+  ignore_errors: true
+  tags: [always]
+
+- name: "Transfer installers in batch ({{ software_plan.operations | selectattr('action', 'in', ['install', 'upgrade']) | selectattr('pattern.mode', 'in', ['exe', 'msi']) | list | length }} items)"
+  ansible.windows.win_copy:
+    src: "{{ software_package_batch.directory }}/"
+    dest: "{{ software_package_batch.root }}\\"
+    force: true
+  register: software_batch_copy
+  when:
+    - not ansible_check_mode
+    - software_package_batch.paths | default([]) | length > 0
+    - software_batch_guard is succeeded
+    - software_batch_guard is not skipped
+  ignore_errors: true
+  no_log: false
+  diff: false
+  tags: [always]
+
+- name: Execute operations
+  ansible.builtin.include_tasks:
+    file: task_execute.yaml
+  vars:
+    software_item: "{{ software_plan.operations[software_index] }}"
+    software_index_label: "Index {{ software_index + 1 }}/{{ software_plan.operations | length }}"
+    software_package_label: "{{ (software_item.artifact | default({})).filename | default((software_item.installed | default({})).name | default((software_item.old | default({})).filename | default(((software_item.pattern | default({})).files | default([]) | join(', ')), true), true), true) | default(software_item.id, true) }}"
+  loop: "{{ range(0, software_plan.operations | length) | list }}"
+  loop_control:
+    loop_var: software_index
+    label: "{{ software_index_label }}: {{ software_item.action }} {{ software_package_label }}"
+  tags: [always]
+
+- name: Clean remaining empty installer cache directories
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+    parameters:
+      Operation: prune_cache
+      ManagedRoot: "{{ dest }}"
+    error_action: stop
+  when: not ansible_check_mode
+  register: software_cache_cleanup
+  ignore_errors: true
+  tags: [always]
+
+- name: Installer cache cleanup warning
+  ansible.builtin.debug:
+    msg: >-
+      WARNING: Failed to fully clean empty installer cache directories.
+      {{ software_cache_cleanup.msg | default((software_cache_cleanup.error | default([]) | map(attribute='output', default='') | join(' ')), true) }}
+  when: software_cache_cleanup is failed
+  tags: [always]
+
+- name: DEBUG installer cache cleanup
+  ansible.builtin.debug:
+    msg: "{{ software_cache_cleanup is failed }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Reboot host according to explicit policy
+  ansible.windows.win_reboot:
+  when:
+    - not ansible_check_mode
+    - software_reboot_required
+    - reboot_policy == 'end'
+    - not software_reboot_deferred | bool
+  tags: [always]
+
+- name: Clear reboot flag after successful reboot
+  ansible.builtin.set_fact:
+    software_reboot_required: false
+  when:
+    - not ansible_check_mode
+    - software_reboot_required
+    - reboot_policy == 'end'
+    - not software_reboot_deferred | bool
+  tags: [always]
+
+- name: DEBUG reboot completion
+  ansible.builtin.debug:
+    msg: "{{ software_reboot_required }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]
+
+- name: Complete host processing
+  ansible.builtin.set_fact:
+    software_completed: true
+  tags: [always]
+
+- name: DEBUG completion
+  ansible.builtin.debug:
+    msg: "{{ software_completed }}"
+  when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+  tags: [never, debug]

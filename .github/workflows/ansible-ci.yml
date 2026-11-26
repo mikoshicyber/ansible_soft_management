@@ -1,0 +1,74 @@
+name: Ansible CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate playbooks and run tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: bash
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      ANSIBLE_FORCE_COLOR: '1'
+      ANSIBLE_COLLECTIONS_PATH: ${{ github.workspace }}/.ci-collections
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        id: dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends msitools
+          python -m pip install 'ansible-core==2.18.17' 'pefile==2024.8.26' PyYAML Jinja2
+          ansible-galaxy collection install -p "$ANSIBLE_COLLECTIONS_PATH" \
+            'ansible.windows:3.2.0' 'community.general:11.3.0'
+          ansible --version
+          ansible-galaxy collection list
+
+      - name: Check Ansible syntax
+        run: |
+          set -euo pipefail
+          inventory='localhost,ci-windows,'
+          ansible-playbook -i "$inventory" --syntax-check playbook.yml
+
+          if [[ -f test_telegram.yml ]]; then
+            ansible-playbook -i "$inventory" --syntax-check test_telegram.yml
+          fi
+
+          syntax_playbook="$(mktemp "$PWD/.syntax-check.XXXXXXXX.yml")"
+          trap 'rm -f -- "$syntax_playbook"' EXIT
+
+          {
+            printf '%s\n' '---' '- name: Validate task files' '  hosts: all' '  gather_facts: false' '  tasks:'
+            for task_file in task_*.yaml telegram.yaml; do
+              [[ "$task_file" == *_v2.yaml ]] && continue
+              printf '    - ansible.builtin.import_tasks: %s\n' "$task_file"
+            done
+          } > "$syntax_playbook"
+
+          ansible-playbook -i "$inventory" --syntax-check "$syntax_playbook"
+
+      - name: Run unit tests
+        if: ${{ !cancelled() && steps.dependencies.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          python -m unittest discover -s tests -v
