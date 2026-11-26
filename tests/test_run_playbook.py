@@ -18,12 +18,12 @@ SPEC.loader.exec_module(launcher)
 
 def listing(*hosts):
     return ('\nplaybook: playbook.yml\n'
-            '  play #1 (localhost): Индексировать артефакты\tTAGS: []\n'
+            '  play #1 (localhost): Index artifacts\tTAGS: []\n'
             '    pattern: [\'localhost\']\n    hosts (0):\n'
-            '  play #2 (all,localhost): Управление программами Windows\tTAGS: []\n'
+            '  play #2 (all,localhost): Manage Windows software\tTAGS: []\n'
             f'    pattern: [\'all\', \'localhost\']\n    hosts ({len(hosts)}):\n'
             + ''.join(f'      {host}\n' for host in hosts)
-            + '  play #3 (localhost): Итоговый отчёт\tTAGS: []\n    hosts (0):\n')
+            + '  play #3 (localhost): Final report\tTAGS: []\n    hosts (0):\n')
 
 
 class LauncherTests(unittest.TestCase):

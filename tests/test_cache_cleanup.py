@@ -17,7 +17,7 @@ def load(name):
 class CacheCleanupTests(unittest.TestCase):
     def test_immediate_cleanup_after_commit_and_file_removal(self):
         operation = next(task for task in load('task_execute.yaml') if 'block' in task)
-        execution = next(task for task in operation['block'] if task['name'] == 'Выполнить запланированные изменения')
+        execution = next(task for task in operation['block'] if 'block' in task and any(t.get('ansible.builtin.include_tasks', {}).get('file') == 'task_package.yaml' for t in task['block']))
         self.assertIn('not ansible_check_mode', execution['when'])
         tasks = execution['block']
         done = next(i for i, task in enumerate(tasks) if task.get('vars', {}).get('software_phase') == 'done')

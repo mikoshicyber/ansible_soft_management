@@ -48,7 +48,7 @@ class CleanupWarningTests(unittest.TestCase):
         self.assertIn('ExpectedHashes', tasks[cleanup]['ansible.windows.win_powershell']['parameters'])
         self.assertIn('not ansible_check_mode', self.execution['when'])
         self.check_warning(tasks, cleanup, 'software_package_cleanup')
-        result = next(task for task in self.operation['block'] if 'Зарегистрировать результат продукта' in task['name'])
+        result = next(task for task in self.operation['block'] if 'software_results' in task.get('ansible.builtin.set_fact', {}))
         self.assertIn('software_results', result['ansible.builtin.set_fact'])
         self.assertNotIn('software_package_cleanup', str(result))
 

@@ -9,7 +9,7 @@ from jinja2.nativetypes import NativeEnvironment
 
 ROOT = Path(__file__).resolve().parents[1]
 TASKS = yaml.safe_load((ROOT / 'telegram.yaml').read_text())
-REPORT = next(task for task in TASKS if task['name'] == 'Подготовить список уведомлений')
+REPORT = next(task for task in TASKS if 'software_notifications' in task.get('ansible.builtin.set_fact', {}))
 BLOCK = next(task for task in TASKS if 'block' in task)
 NOTICE, SEND, ERROR, SUCCESS = BLOCK['block']
 
@@ -46,7 +46,7 @@ class TelegramReportTest(unittest.TestCase):
         parts = self.report(hosts, failed=True, software_catalog={'catalog': []})
         self.assertEqual(len(parts), 1)
         text = parts[0]
-        for value in ('<b>Обновления завершены с ошибками</b>', '<b>pc-a</b>:', '<i>Установлено/обновлено</i>:', '• AIMP.exe', '<i>Ошибки</i>:', '• blender — No matching artifact', '• krita', 'Требуется перезагрузка.'):
+        for value in ('<b>Updates completed with errors</b>', '<b>pc-a</b>:', '<i>Installed/updated</i>:', '• AIMP.exe', '<i>Errors</i>:', '• blender — No matching artifact', '• krita', 'Reboot required.'):
             self.assertIn(value, text)
 
     def test_original_compact_success_format(self):
@@ -61,26 +61,26 @@ class TelegramReportTest(unittest.TestCase):
         parts = self.report(hosts, software_catalog={'catalog': []})
         self.assertEqual(len(parts), 1)
         message = self.render(SEND['community.general.telegram']['api_args']['text'], item=parts[0], software_notification_index=0, software_notifications=parts)
-        self.assertEqual(message, '<b>Обновления завершены</b>\n<b>pc-a</b>:\n<i>Установлено/обновлено</i>:\n• Firefox.exe\n• Krita.exe\n<b>pc-c</b>:\n<i>Установлено/обновлено</i>:\n• AIMP.exe')
+        self.assertEqual(message, '<b>Updates completed</b>\n<b>pc-a</b>:\n<i>Installed/updated</i>:\n• Firefox.exe\n• Krita.exe\n<b>pc-c</b>:\n<i>Installed/updated</i>:\n• AIMP.exe')
 
     def test_incomplete_host_without_results(self):
         hosts = [{'host': 'pc-a', 'completed': False, 'reboot_required': False, 'results': []}]
         parts = self.report(hosts, failed=True, software_catalog={'catalog': []})
         self.assertIn('<b>pc-a</b>:', parts[0])
-        self.assertIn('Обработка не завершена.', parts[0])
-        self.assertNotIn('Без изменений.', parts[0])
+        self.assertIn('Processing incomplete.', parts[0])
+        self.assertNotIn('No changes.', parts[0])
 
     def test_no_changes_still_sends_report(self):
         hosts = [{'host': 'pc-a', 'completed': True, 'reboot_required': False, 'results': []}]
         parts = self.report(hosts, software_catalog={'catalog': []})
         self.assertEqual(len(parts), 1)
-        self.assertIn('<b>Обновления завершены</b>', parts[0])
-        self.assertIn('Без изменений.', parts[0])
+        self.assertIn('<b>Updates completed</b>', parts[0])
+        self.assertIn('No changes.', parts[0])
 
     def test_catalog_failure_and_no_hosts(self):
         parts = self.report([], failed=True)
-        self.assertIn('Ошибка подготовки локального каталога', parts[0])
-        self.assertIn('Нет результатов Windows-хостов', parts[0])
+        self.assertIn('Failed to prepare local catalog', parts[0])
+        self.assertIn('No Windows host results', parts[0])
 
     def test_long_unicode_report_parts(self):
         hosts = [{'host': 'pc-a', 'completed': False, 'reboot_required': False, 'results': [
@@ -90,7 +90,7 @@ class TelegramReportTest(unittest.TestCase):
         self.assertIn('🚧' * 9000, ''.join(parts))
         for index, part in enumerate(parts):
             message = self.render(SEND['community.general.telegram']['api_args']['text'], item=part, software_notification_index=index, software_notifications=parts)
-            self.assertTrue(message.startswith(f'Часть {index + 1}/{len(parts)}\n'))
+            self.assertTrue(message.startswith(f'Part {index + 1}/{len(parts)}\n'))
             self.assertLessEqual(len(message.encode('utf-16-le')) // 2, 4096)
 
     def test_html_escaping_and_sections(self):
@@ -107,8 +107,8 @@ class TelegramReportTest(unittest.TestCase):
             self.assertLessEqual(len(part.encode('utf-16-le')) // 2, 3600)
         joined = ''.join(parts)
         self.assertIn('<b>&lt;pc&amp;&gt;</b>:', joined)
-        self.assertIn('<i>Удалено</i>:', joined)
-        self.assertIn('<i>Предупреждения</i>:', joined)
+        self.assertIn('<i>Removed</i>:', joined)
+        self.assertIn('<i>Warnings</i>:', joined)
         self.assertIn('<&>' * 1000, unescape(joined))
         self.assertIn('&lt;/b&gt;&lt;a href="x"&gt;', joined)
 
@@ -152,7 +152,7 @@ class TelegramReportTest(unittest.TestCase):
             context = {'software_telegram_result': result}
             self.assertEqual(all(self.condition(condition, **context) for condition in SUCCESS['when']), success)
             self.assertEqual(self.condition(ERROR['when'], **context), failure)
-        self.assertEqual(TASKS[-1]['name'], 'Вернуть ненулевой статус при ошибках')
+        self.assertIn('ansible.builtin.fail', TASKS[-1])
         self.assertEqual(TASKS[-1]['when'], 'software_failed')
 
     def test_docker_environment_forwarding(self):

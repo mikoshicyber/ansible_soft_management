@@ -203,7 +203,7 @@ class NativeWiringTests(unittest.TestCase):
         self.assertEqual(len(copies), 1)
         self.assertIn('not ansible_check_mode', copies[0]['when'])
         self.assertTrue(copies[0]['ignore_errors'])
-        snapshot = next(t for t in tasks if t['name'] == 'Получить фактическое состояние программ')
+        snapshot = next(t for t in tasks if t.get('register') == 'software_snapshot' and 'ansible.windows.win_powershell' in t)
         self.assertFalse(snapshot['check_mode'])
         self.assertEqual(set(snapshot['ansible.windows.win_powershell']['parameters']), {'ProbePaths', 'MsiMetadata', 'MsiIdentities'})
         guard = next(t for t in tasks if 'ansible.builtin.assert' in t)
@@ -220,7 +220,9 @@ class NativeWiringTests(unittest.TestCase):
         self.assertNotIn('when', operations)
         self.assertIs(windows[0]['ansible.builtin.set_fact']['software_reboot_deferred'], False)
         guarded = [t for t in windows if 'software_reboot_deferred' in str(t.get('when', []))]
-        self.assertEqual([t['name'] for t in guarded], ['Перезагрузить хост по явной политике', 'Сбросить признак после успешной перезагрузки'])
+        self.assertEqual(len(guarded), 2)
+        self.assertIn('ansible.windows.win_reboot', guarded[0])
+        self.assertEqual(guarded[1]['ansible.builtin.set_fact']['software_reboot_required'], False)
         for task in yaml.safe_load((ROOT / 'task_package.yaml').read_text()):
             if 'ansible.windows.win_package' in task:
                 self.assertEqual(task['retries'], 2)

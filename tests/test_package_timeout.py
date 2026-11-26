@@ -54,12 +54,12 @@ class PackageTimeoutTests(unittest.TestCase):
             self.assertNotIn('async', task)
             self.assertNotIn('poll', task)
             self.assertEqual(self.render(task['timeout'], software_package_timeout_seconds=600), 600)
-            self.assertTrue(task['no_log'])
+            self.assertIs(task['no_log'], False)
             self.assertNotIn('ignore_errors', task)
             self.assertNotIn('failed_when', task)
 
     def test_check_mode_and_pending_before_package(self):
-        block = next(task for task in self.execute['block'] if task['name'].startswith('Выполнить запланированные изменения '))
+        block = next(task for task in self.execute['block'] if 'block' in task and any(t.get('ansible.builtin.include_tasks', {}).get('file') == 'task_package.yaml' for t in task['block']))
         self.assertIn('not ansible_check_mode', block['when'])
         tasks = block['block']
         pending = next(i for i, task in enumerate(tasks) if task.get('vars', {}).get('software_phase') == 'pending')
@@ -74,7 +74,7 @@ class PackageTimeoutTests(unittest.TestCase):
     def test_timeout_report(self):
         rescue = self.execute['rescue'][0]
         template = rescue['vars']['software_failed_package_timeout']
-        for name in ['Установить или обновить пакет setup.exe', 'Удалить пакет Example', 'Другое имя задачи']:
+        for name in ['Install or upgrade package setup.exe', 'Remove package Example', 'Another task name']:
             for result in [{'timedout': {'frame': 'Interrupted', 'period': 900}}, {'msg': 'The ansible.windows.win_package action failed to execute in the expected time frame (900) and was terminated'}]:
                 with self.subTest(name=name, result=result):
                     timed_out = self.render(template, ansible_failed_task={'name': name, 'action': 'ansible.windows.win_package'}, ansible_failed_result=result)

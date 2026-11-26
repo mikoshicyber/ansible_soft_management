@@ -20,6 +20,13 @@ class FileLoggingTests(unittest.TestCase):
     def render(self, template, **values):
         return self.env.from_string(template).render(**values)
 
+    def package_label(self, item):
+        execute = next(t for t in load('task_windows.yaml') if t.get('ansible.builtin.include_tasks', {}).get('file') == 'task_execute.yaml')
+        return self.render(execute['vars']['software_package_label'], software_item=item)
+
+    def render_package_name(self, template, item, **values):
+        return self.render(template, software_item=item, software_package_label=self.package_label(item), **values)
+
     def test_index_replaces_start_debug(self):
         tasks = load('task_package.yaml')
         self.assertFalse(any('ansible.builtin.debug' in task and task['tags'] == ['always'] for task in tasks))
@@ -31,7 +38,7 @@ class FileLoggingTests(unittest.TestCase):
         self.assertEqual(self.render(execute['vars']['software_item'], software_plan=plan, software_index=0), item)
         label = self.render(execute['vars']['software_index_label'], software_plan=plan, software_index=0)
         self.assertEqual(label, 'Index 1/1')
-        text = self.render(execute['loop_control']['label'], software_index_label=label, software_item=item)
+        text = self.render_package_name(execute['loop_control']['label'], item, software_index_label=label)
         self.assertEqual(text, 'Index 1/1: upgrade setup.exe')
         self.assertNotIn('SECRET', text)
         self.assertFalse(execute.get('no_log', False))
@@ -39,16 +46,16 @@ class FileLoggingTests(unittest.TestCase):
     def test_package_and_prepare_names(self):
         install, remove = [task for task in load('task_package.yaml') if 'ansible.windows.win_package' in task]
         item = {'id': 'example', 'artifact': {'filename': 'setup.exe'}, 'pattern': {'args': 'SECRET'}}
-        self.assertIn('setup.exe', self.render(install['name'], software_item=item, software_index_label='Index 1/1'))
-        self.assertNotIn('SECRET', self.render(install['name'], software_item=item, software_index_label='Index 1/1'))
-        self.assertIn('Example', self.render(remove['name'], software_item={'id': 'example', 'installed': {'name': 'Example'}}, software_index_label='Index 1/1'))
+        self.assertIn('setup.exe', self.render_package_name(install['name'], item, software_index_label='Index 1/1'))
+        self.assertNotIn('SECRET', self.render_package_name(install['name'], item, software_index_label='Index 1/1'))
+        self.assertIn('Example', self.render_package_name(remove['name'], {'id': 'example', 'installed': {'name': 'Example'}}, software_index_label='Index 1/1'))
         for task in (install, remove):
-            self.assertTrue(task['no_log'])
+            self.assertIs(task['no_log'], False)
         for task in load('task_package_prepare.yaml'):
-            if 'win_copy' in ' '.join(task) or 'контрольную сумму' in task['name']:
-                self.assertIn('setup.exe', self.render(task['name'], software_item=item, software_index_label='Index 1/1'))
+            if 'win_copy' in ' '.join(task) or 'checksum' in task['name']:
+                self.assertIn('setup.exe', self.render_package_name(task['name'], item, software_index_label='Index 1/1'))
 
-    def test_file_batches_preserve_order_and_secrecy(self):
+    def test_file_batches_preserve_order_and_disable_diff(self):
         tasks = load('task_files.yaml')
         self.assertFalse(any('ansible.builtin.include_tasks' in task or 'ansible.builtin.debug' in task for task in tasks))
         stage = next(t for t in tasks if t.get('software_manager', {}).get('operation') == 'stage_files')
@@ -62,19 +69,19 @@ class FileLoggingTests(unittest.TestCase):
         self.assertLess(tasks.index(stage), tasks.index(copy))
         self.assertLess(tasks.index(copy), tasks.index(template))
         for task in (copy, template):
-            self.assertTrue(task['no_log'])
+            self.assertIs(task['no_log'], False)
             self.assertFalse(task['diff'])
-            self.assertIn('bundle.zip', self.render(task['name'], software_item={'id': 'arc', 'artifact': {'filename': 'bundle.zip'}}, software_index_label='Index 1/1'))
+            self.assertIn('bundle.zip', self.render_package_name(task['name'], {'id': 'arc', 'artifact': {'filename': 'bundle.zip'}}, software_index_label='Index 1/1'))
         self.assertEqual(tasks[-1]['ansible.windows.win_powershell']['parameters']['Operation'], 'remove')
 
     def test_check_mode_logs_artifact_in_existing_task(self):
         tasks = load('task_execute.yaml')
         item = {'id': 'example', 'action': 'inspect', 'artifact': {'filename': 'bundle.zip'}}
-        self.assertIn('bundle.zip', self.render(tasks[0]['name'], software_item=item, software_index_label='Index 1/1'))
+        self.assertIn('bundle.zip', self.render_package_name(tasks[0]['name'], item, software_index_label='Index 1/1'))
         block = next(task for task in tasks if 'block' in task)
         self.assertFalse(any('ansible.builtin.debug' in t and t['tags'] == ['always'] for t in block['block']))
         decision = next(t for t in block['block'] if 'software_run_operation' in t.get('ansible.builtin.set_fact', {}))
-        text = self.render(decision['name'], software_item=item, software_index_label='Index 1/1', software_action='update_files')
+        text = self.render_package_name(decision['name'], item, software_index_label='Index 1/1', software_action='update_files')
         self.assertIn('Index 1/1', text)
         self.assertIn('update_files: bundle.zip', text)
         self.assertTrue(self.env.compile_expression(decision['changed_when'])(ansible_check_mode=True, software_action='update_files'))
