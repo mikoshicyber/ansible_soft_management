@@ -44,13 +44,13 @@ class FileLoggingTests(unittest.TestCase):
         self.assertFalse(execute.get('no_log', False))
 
     def test_package_and_prepare_names(self):
-        install, remove = [task for task in load('task_package.yaml') if 'ansible.windows.win_package' in task]
+        install, remove = [task for task in load('task_package.yaml') if task.get('ansible.windows.win_powershell', {}).get('parameters', {}).get('Operation') in ('install', 'remove')]
         item = {'id': 'example', 'artifact': {'filename': 'setup.exe'}, 'pattern': {'args': 'SECRET'}}
         self.assertIn('setup.exe', self.render_package_name(install['name'], item, software_index_label='Index 1/1'))
         self.assertNotIn('SECRET', self.render_package_name(install['name'], item, software_index_label='Index 1/1'))
         self.assertIn('Example', self.render_package_name(remove['name'], {'id': 'example', 'installed': {'name': 'Example'}}, software_index_label='Index 1/1'))
         for task in (install, remove):
-            self.assertIs(task['no_log'], False)
+            self.assertIs(task['no_log'], True)
         for task in load('task_package_prepare.yaml'):
             if 'win_copy' in ' '.join(task) or 'checksum' in task['name']:
                 self.assertIn('setup.exe', self.render_package_name(task['name'], item, software_index_label='Index 1/1'))
@@ -69,7 +69,7 @@ class FileLoggingTests(unittest.TestCase):
         self.assertLess(tasks.index(stage), tasks.index(copy))
         self.assertLess(tasks.index(copy), tasks.index(template))
         for task in (copy, template):
-            self.assertIs(task['no_log'], False)
+            self.assertIs(task['no_log'], True)
             self.assertFalse(task['diff'])
             self.assertIn('bundle.zip', self.render_package_name(task['name'], {'id': 'arc', 'artifact': {'filename': 'bundle.zip'}}, software_index_label='Index 1/1'))
         self.assertEqual(tasks[-1]['ansible.windows.win_powershell']['parameters']['Operation'], 'remove')
@@ -86,6 +86,24 @@ class FileLoggingTests(unittest.TestCase):
         self.assertIn('update_files: bundle.zip', text)
         self.assertTrue(self.env.compile_expression(decision['changed_when'])(ansible_check_mode=True, software_action='update_files'))
         self.assertFalse(self.env.compile_expression(decision['changed_when'])(ansible_check_mode=False, software_action='update_files'))
+
+    def test_sensitive_tasks_are_hidden(self):
+        def walk(tasks):
+            for task in tasks:
+                yield task
+                for key in ('block', 'rescue', 'always'):
+                    yield from walk(task.get(key, []))
+        sensitive_operations = {'normalize', 'discover_msi', 'plan', 'prepare', 'stage_packages', 'stage_files', 'plan_files', 'prune_files', 'verify', 'verify_files', 'transition'}
+        for name in ('task_windows.yaml', 'task_execute.yaml', 'task_file_plan.yaml', 'task_files.yaml', 'task_state.yaml', 'task_verify.yaml', 'task_file_verify.yaml'):
+            for task in walk(load(name)):
+                operation = task.get('software_manager', {}).get('operation')
+                parameters = task.get('ansible.windows.win_powershell', {}).get('parameters', {})
+                facts = task.get('ansible.builtin.set_fact', {})
+                if operation in sensitive_operations or parameters.get('Operation') in ('read', 'write', 'template') or 'ansible.windows.win_shell' in task or any(key in facts and bool(facts[key]) for key in ('software_layers', 'software_effective_files', 'software_state_current', 'software_preflight_rendered')):
+                    with self.subTest(name=name, task=task['name']):
+                        self.assertIs(task.get('no_log'), True)
+                if 'ansible.windows.win_shell' in task:
+                    self.assertNotIn('software_command.command', task['loop_control']['label'])
 
     def test_no_references_to_removed_helper(self):
         for path in [*ROOT.glob('*.yaml'), *ROOT.glob('*.yml')]:

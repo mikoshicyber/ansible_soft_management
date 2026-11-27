@@ -19,6 +19,7 @@ def preflight(project):
         'library/software_manager.py', 'module_utils/software_core.py',
         'scripts/installed_software.ps1', 'scripts/filesystem.ps1',
         'scripts/package_guard.ps1', 'scripts/stop_process.ps1',
+        'scripts/package_execute.ps1', 'scripts/package_process.cs',
     )
     errors = []
     for name in directories:

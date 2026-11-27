@@ -31,7 +31,7 @@
 - name: Build global settings
   ansible.builtin.set_fact:
     software_layers: "{{ [{'scope': 'all', 'patterns': lookup('ansible.builtin.vars', 'patterns__all', default=[])}] }}"
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: DEBUG global settings
@@ -44,7 +44,7 @@
   ansible.builtin.set_fact:
     software_layers: "{{ software_layers + [{'scope': 'group', 'patterns': lookup('ansible.builtin.vars', 'patterns__' ~ item, default=[])}] }}"
   loop: "{{ group_names | difference(['all', 'ungrouped']) | sort }}"
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: DEBUG group settings
@@ -56,7 +56,7 @@
 - name: Add host settings
   ansible.builtin.set_fact:
     software_layers: "{{ software_layers + [{'scope': 'host', 'patterns': lookup('ansible.builtin.vars', 'patterns__' ~ inventory_hostname, default=[])}] }}"
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: DEBUG host settings
@@ -76,7 +76,7 @@
     ansible_connection: local
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   register: software_patterns
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: Read state database
@@ -88,7 +88,7 @@
     error_action: stop
   register: software_state_raw
   check_mode: false
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: Read MSI metadata on controller
@@ -104,7 +104,7 @@
     ansible_connection: local
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   register: software_msi_catalog
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: Discover installed software
@@ -118,7 +118,7 @@
   register: software_snapshot
   when: software_patterns.patterns | selectattr('state', 'equalto', 'absent') | selectattr('mode', 'in', ['exe', 'msi']) | list | length > 0
   check_mode: false
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: Build host-specific plan
@@ -139,7 +139,7 @@
     ansible_connection: local
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   register: software_plan
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: Initialize state and planning errors
@@ -147,7 +147,7 @@
     software_database: "{{ software_plan.database }}"
     software_state_current: "{{ software_state_raw.result }}"
     software_results: "{{ (software_plan.errors | list) + (software_plan.blocked | default([])) + (software_plan.plan_warnings | default([])) }}"
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: DEBUG plan
@@ -183,7 +183,7 @@
   when:
     - not ansible_check_mode
     - software_plan.state_refresh | default({}) | length > 0
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: Synchronize refreshed versions
@@ -197,7 +197,7 @@
   when:
     - software_refresh_result is succeeded
     - software_refresh_result is not skipped
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: DEBUG version refresh
@@ -225,7 +225,7 @@
       loop_control:
         loop_var: software_preflight_template
         label: "{{ software_file.path }}"
-      no_log: false
+      no_log: true
       tags: [always]
 
     - name: DEBUG initial template checksums
@@ -244,7 +244,7 @@
       register: software_preflight_snapshot
       when: software_plan.file_preflight.paths | length > 0
       check_mode: false
-      no_log: false
+      no_log: true
       tags: [always]
 
     - name: Exclude unchanged managed files from execution
@@ -258,7 +258,7 @@
         ansible_connection: local
         ansible_python_interpreter: "{{ ansible_playbook_python }}"
       register: software_preflight_result
-      no_log: false
+      no_log: true
       tags: [always]
 
     - name: DEBUG managed-file preflight
@@ -291,7 +291,7 @@
     - not ansible_check_mode
     - software_plan.operations | selectattr('action', 'in', ['install', 'upgrade']) | list | length > 0
   ignore_errors: true
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "Check batch transfer paths ({{ software_plan.operations | selectattr('action', 'in', ['install', 'upgrade']) | list | length }} items)"
@@ -320,7 +320,7 @@
     - software_batch_guard is succeeded
     - software_batch_guard is not skipped
   ignore_errors: true
-  no_log: false
+  no_log: true
   diff: false
   tags: [always]
 

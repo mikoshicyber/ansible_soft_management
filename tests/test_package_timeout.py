@@ -51,15 +51,16 @@ class PackageTimeoutTests(unittest.TestCase):
                     core.timeout_value(value, 'timeout')
 
     def test_install_remove_are_bounded(self):
-        tasks = [task for task in self.package if 'ansible.windows.win_package' in task]
-        self.assertEqual(len(tasks), 2)
+        tasks = [task for task in self.package if 'ansible.windows.win_powershell' in task]
+        self.assertEqual(len(tasks), 3)
         for task in tasks:
             self.assertNotIn('async', task)
             self.assertNotIn('poll', task)
-            self.assertEqual(self.render(task['timeout'], software_package_timeout_seconds=600), 600)
-            self.assertIs(task['no_log'], False)
+            self.assertEqual(self.render(task['timeout'], software_package_timeout_seconds=600), 720)
+            self.assertEqual(self.render(task['ansible.windows.win_powershell']['parameters']['TimeoutSeconds'], software_package_timeout_seconds=600), 600)
+            self.assertIs(task['no_log'], True)
             self.assertNotIn('ignore_errors', task)
-            self.assertNotIn('failed_when', task)
+            self.assertIn('timed_out', task['failed_when'])
 
     def test_check_mode_and_pending_before_package(self):
         block = next(task for task in self.execute['block'] if 'block' in task and any(t.get('ansible.builtin.include_tasks', {}).get('file') == 'task_package.yaml' for t in task['block']))
@@ -74,24 +75,38 @@ class PackageTimeoutTests(unittest.TestCase):
         self.assertLess(post, done)
         self.assertFalse(any(task.get('ansible.builtin.include_tasks', {}).get('file') == 'task_state.yaml' for task in self.execute['rescue']))
 
-    def test_timeout_report(self):
+    def rescue_values(self, name, action, result):
         rescue = self.execute['rescue'][0]
-        template = rescue['vars']['software_failed_package_timeout']
-        for name in ['Install or upgrade package setup.exe', 'Remove package Example', 'Another task name']:
-            for result in [{'timedout': {'frame': 'Interrupted', 'period': 900}}, {'msg': 'The ansible.windows.win_package action failed to execute in the expected time frame (900) and was terminated'}]:
+        values = dict(software_results=[], software_item={'id': 'app', 'pattern': {'mode': 'msi'}}, software_action='install', software_package_timeout_seconds=900, software_hook_timeout_seconds=120, ansible_failed_task={'name': name, 'action': action}, ansible_failed_result=result)
+        for key, expression in rescue['vars'].items():
+            values[key] = self.render(expression, **values)
+        return values, self.render(rescue['ansible.builtin.set_fact']['software_results'], **values)
+
+    def test_timeout_report(self):
+        for name in ['Install or upgrade package setup.exe', 'Remove package Example', 'Reapply MSI Example']:
+            for result, confirmed in [({'timedout': {'frame': 'Interrupted', 'period': 1020}}, False), ({'msg': 'The ansible.windows.win_powershell action failed to execute in the expected time frame (1020) and was terminated'}, False), ({'result': {'timed_out': True, 'cleanup_confirmed': True}}, True), ({'result': {'timed_out': True, 'cleanup_confirmed': False}}, False)]:
                 with self.subTest(name=name, result=result):
-                    timed_out = self.render(template, ansible_failed_task={'name': name, 'action': 'ansible.windows.win_package'}, ansible_failed_result=result)
-                    self.assertIs(timed_out, True)
-                    values = dict(software_results=[], software_item={'id': 'app'}, software_action='install', software_package_timeout_seconds=900, software_hook_timeout_seconds=120, ansible_failed_task={'name': name, 'action': 'ansible.windows.win_package'}, ansible_failed_result=result)
-                    for key, expression in rescue['vars'].items():
-                        values[key] = self.render(expression, **values)
-                    report = self.render(rescue['ansible.builtin.set_fact']['software_results'], **values)
-                    self.assertEqual(report, [{'id': 'app', 'status': 'error', 'action': 'install', 'filename': 'app', 'reason': 'package timeout (900 s)', 'timed_out': True}])
+                    values, report = self.rescue_values(name, 'ansible.windows.win_powershell', result)
+                    self.assertIs(values['software_failed_package_timeout'], True)
+                    reason = 'package timeout (900 s); ' + ('installer job terminated' if confirmed else 'installer termination not confirmed')
+                    self.assertEqual(report, [{'id': 'app', 'status': 'error', 'action': 'install', 'filename': 'app', 'reason': reason, 'timed_out': True}])
+                    self.assertTrue(self.render(self.execute['rescue'][0]['ansible.builtin.set_fact']['software_reboot_deferred'], **values))
 
     def test_other_failures_are_not_timeouts(self):
-        template = self.execute['rescue'][0]['vars']['software_failed_package_timeout']
-        for action, message in [('ansible.windows.win_package', 'unexpected return code'), ('ansible.windows.win_shell', 'The action failed to execute in the expected time frame (900)'), ('ansible.windows.win_package', '')]:
-            self.assertIs(self.render(template, ansible_failed_task={'name': 'any', 'action': action}, ansible_failed_result={'msg': message}), False)
+        for name, action, result in [('Install or upgrade package app', 'ansible.windows.win_powershell', {'result': {'rc': 1603}}), ('Check file', 'ansible.windows.win_powershell', {'timedout': {'period': 900}}), ('PRE', 'ansible.windows.win_shell', {'timedout': {'period': 900}})]:
+            values, _ = self.rescue_values(name, action, result)
+            self.assertIs(values['software_failed_package_timeout'], False)
+
+    def test_secret_not_copied_into_report(self):
+        result = {'result': {'rc': 1603}, 'msg': 'password=SECRET', 'stdout': 'SECRET', 'stderr': 'SECRET', 'invocation': {'arguments': 'SECRET'}}
+        _, report = self.rescue_values('Install or upgrade package app', 'ansible.windows.win_powershell', result)
+        self.assertEqual(report[0]['reason'], 'Install or upgrade package app; rc=1603')
+        self.assertNotIn('SECRET', str(report))
+
+    def test_msi_busy_defers_reboot(self):
+        values, report = self.rescue_values('Install or upgrade package app', 'ansible.windows.win_powershell', {'result': {'rc': 1618}})
+        self.assertFalse(report[0]['timed_out'])
+        self.assertTrue(self.render(self.execute['rescue'][0]['ansible.builtin.set_fact']['software_reboot_deferred'], **values))
 
 
 if __name__ == '__main__':

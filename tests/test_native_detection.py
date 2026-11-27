@@ -89,7 +89,7 @@ class NativeDetectionTests(unittest.TestCase):
         result = self.plan(self.snapshot({checksum: self.msi()}, [self.app(self.new_code)]), db)
         op = result['operations'][0]
         self.assertEqual(op['action'], 'upgrade')
-        self.assertIn('REINSTALL=ALL REINSTALLMODE=vomus', op['msi_reinstall_command'])
+        self.assertIn('REINSTALL=ALL REINSTALLMODE=vomus', (ROOT / 'scripts/package_execute.ps1').read_text())
         self.assertEqual(result['warnings'][0]['status'], 'warning')
 
     def test_msi_missing_and_conflicting_metadata(self):
@@ -255,7 +255,7 @@ class NativeWiringTests(unittest.TestCase):
         self.assertIn('ansible.windows.win_reboot', guarded[0])
         self.assertEqual(guarded[1]['ansible.builtin.set_fact']['software_reboot_required'], False)
         for task in yaml.safe_load((ROOT / 'task_package.yaml').read_text()):
-            if 'ansible.windows.win_package' in task:
+            if task.get('ansible.windows.win_powershell', {}).get('parameters', {}).get('Operation') in ('install', 'remove', 'reapply'):
                 self.assertEqual(task['retries'], 2)
                 self.assertIn('1618', task['until'])
                 self.assertNotIn('async', task)

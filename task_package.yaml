@@ -1,76 +1,107 @@
 ---
 - name: "Install or upgrade package {{ software_index_label }}: {{ software_package_label }}"
-  ansible.windows.win_package:
-    path: "{{ software_item.cache_path }}"
-    state: present
-    provider: "{{ 'msi' if software_item.pattern.mode == 'msi' else 'registry' }}"
-    arguments: "{{ software_item.pattern.args | default(omit) }}"
-    expected_return_code: "{{ software_item.pattern.expected_return_code }}"
-    wait_for_children: "{{ software_item.pattern.wait_for_children }}"
-    checksum: "{{ software_item.artifact.checksum }}"
-    checksum_algorithm: sha256
-    chdir: "{{ software_item.cache_path | win_dirname }}"
-    log_path: "{{ (software_item.cache_path ~ '.log') if software_item.pattern.mode == 'msi' else omit }}"
-  timeout: "{{ software_package_timeout_seconds | int }}"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/package_execute.ps1', rstrip=false) }}"
+    parameters:
+      ProcessSource: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/package_process.cs', rstrip=false) }}"
+      Operation: install
+      Provider: "{{ 'msi' if software_item.pattern.mode == 'msi' else 'registry' }}"
+      Path: "{{ software_item.cache_path }}"
+      ProductId: "{{ (software_item.artifact.msi_metadata | default({})).product_id | default('') }}"
+      Arguments: "{{ software_item.pattern.args | default([]) }}"
+      WaitForChildren: "{{ software_item.pattern.wait_for_children }}"
+      VerifySignature: "{{ software_item.pattern.verify_signature }}"
+      Checksum: "{{ software_item.artifact.checksum }}"
+      TimeoutSeconds: "{{ software_package_timeout_seconds | int }}"
+    error_action: stop
+  timeout: "{{ (software_package_timeout_seconds | int) + 120 }}"
   register: software_pkg_install
-  until: software_pkg_install is succeeded or software_item.pattern.mode != 'msi' or (software_pkg_install.rc | default(-1) | int) != 1618
+  failed_when: >-
+    (software_pkg_install.result | default({})).rc is not defined or
+    ((software_pkg_install.result | default({})).timed_out | default(false) | bool) or
+    ((software_pkg_install.result | default({})).rc | int not in software_item.pattern.expected_return_code and software_pkg_install.changed | default(false))
+  until: software_pkg_install is succeeded or software_item.pattern.mode != 'msi' or ((software_pkg_install.result | default({})).rc | default(-1) | int) != 1618
   retries: 2
   delay: 15
   when: software_action in ['install', 'upgrade']
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "Reapply MSI {{ software_index_label }}: {{ software_package_label }}"
-  ansible.windows.win_command:
-    cmd: "{{ software_item.msi_reinstall_command }}"
-    chdir: "{{ software_item.cache_path | win_dirname }}"
-  timeout: "{{ software_package_timeout_seconds | int }}"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/package_execute.ps1', rstrip=false) }}"
+    parameters:
+      ProcessSource: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/package_process.cs', rstrip=false) }}"
+      Operation: reapply
+      Provider: msi
+      Path: "{{ software_item.cache_path }}"
+      ProductId: "{{ (software_item.artifact.msi_metadata | default({})).product_id | default('') }}"
+      Arguments: "{{ software_item.pattern.args | default([]) }}"
+      WaitForChildren: "{{ software_item.pattern.wait_for_children }}"
+      VerifySignature: "{{ software_item.pattern.verify_signature }}"
+      Checksum: "{{ software_item.artifact.checksum }}"
+      TimeoutSeconds: "{{ software_package_timeout_seconds | int }}"
+    error_action: stop
+  timeout: "{{ (software_package_timeout_seconds | int) + 120 }}"
   register: software_msi_reinstall
-  failed_when: software_msi_reinstall.rc | default(-1) | int not in software_item.pattern.expected_return_code
-  until: software_msi_reinstall is succeeded or (software_msi_reinstall.rc | default(-1) | int) != 1618
+  failed_when: >-
+    (software_msi_reinstall.result | default({})).rc is not defined or
+    ((software_msi_reinstall.result | default({})).timed_out | default(false) | bool) or
+    (software_msi_reinstall.result | default({})).rc | int not in software_item.pattern.expected_return_code
+  until: software_msi_reinstall is succeeded or ((software_msi_reinstall.result | default({})).rc | default(-1) | int) != 1618
   retries: 2
   delay: 15
   when:
     - software_action in ['install', 'upgrade']
     - software_item.pattern.mode == 'msi'
     - not (software_pkg_install.changed | default(false))
-  no_log: false
+  no_log: true
   tags: [always]
 
-- name: "Record MSI reapplication result {{ software_index_label }}: {{ software_package_label }}"
+- name: "Record installer result {{ software_index_label }}: {{ software_package_label }}"
   ansible.builtin.set_fact:
-    software_pkg_install: "{{ software_msi_reinstall | combine({'reboot_required': (software_msi_reinstall.rc | int) in [1641, 3010]}) }}"
-  when: software_msi_reinstall is not skipped and software_msi_reinstall.rc is defined
-  no_log: false
+    software_pkg_install: "{{ {'changed': software_install_receipt.changed | default(false)} | combine(software_install_receipt.result | default({})) }}"
+  vars:
+    software_install_receipt: "{{ software_msi_reinstall if software_msi_reinstall is not skipped else software_pkg_install }}"
+  when: software_action in ['install', 'upgrade']
+  no_log: true
   tags: [always]
 
-- name: "DEBUG MSI reapplication result {{ software_index_label }}: {{ software_package_label }}"
+- name: "DEBUG installer result {{ software_index_label }}: {{ software_package_label }}"
   ansible.builtin.debug:
     msg: "{{ software_pkg_install.changed | default(false) }}"
   when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
   tags: [never, debug]
 
 - name: "Remove package {{ software_index_label }}: {{ software_package_label }}"
-  ansible.windows.win_package:
-    state: absent
-    provider: "{{ software_item.installed.provider }}"
-    product_id: "{{ software_item.installed.product_id }}"
-    arguments: "{{ software_item.pattern.uninstall_args | default(omit) }}"
-    expected_return_code: "{{ software_item.pattern.expected_return_code }}"
-    wait_for_children: "{{ software_item.pattern.wait_for_children }}"
-  timeout: "{{ software_package_timeout_seconds | int }}"
+  ansible.windows.win_powershell:
+    script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/package_execute.ps1', rstrip=false) }}"
+    parameters:
+      ProcessSource: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/package_process.cs', rstrip=false) }}"
+      Operation: remove
+      Provider: "{{ software_item.installed.provider }}"
+      ProductId: "{{ software_item.installed.product_id }}"
+      Arguments: "{{ software_item.pattern.uninstall_args | default([]) }}"
+      WaitForChildren: "{{ software_item.pattern.wait_for_children }}"
+      TimeoutSeconds: "{{ software_package_timeout_seconds | int }}"
+    error_action: stop
+  timeout: "{{ (software_package_timeout_seconds | int) + 120 }}"
   register: software_pkg_remove
-  until: software_pkg_remove is succeeded or software_item.installed.provider != 'msi' or (software_pkg_remove.rc | default(-1) | int) != 1618
+  failed_when: >-
+    (software_pkg_remove.result | default({})).rc is not defined or
+    ((software_pkg_remove.result | default({})).timed_out | default(false) | bool) or
+    ((software_pkg_remove.result | default({})).rc | int not in software_item.pattern.expected_return_code and software_pkg_remove.changed | default(false))
+  until: software_pkg_remove is succeeded or software_item.installed.provider != 'msi' or ((software_pkg_remove.result | default({})).rc | default(-1) | int) != 1618
   retries: 2
   delay: 15
   when: software_action == 'remove'
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "Track reboot requirement {{ software_index_label }}: {{ software_package_label }}"
   ansible.builtin.set_fact:
-    software_item_reboot: "{{ (software_pkg_install.reboot_required | default(false)) or (software_pkg_remove.reboot_required | default(false)) }}"
-    software_reboot_required: "{{ software_reboot_required or (software_pkg_install.reboot_required | default(false)) or (software_pkg_remove.reboot_required | default(false)) }}"
+    software_item_reboot: "{{ (software_pkg_install.reboot_required | default(false)) or ((software_pkg_remove.result | default({})).reboot_required | default(false)) }}"
+    software_reboot_required: "{{ software_reboot_required or (software_pkg_install.reboot_required | default(false)) or ((software_pkg_remove.result | default({})).reboot_required | default(false)) }}"
   tags: [always]
 
 - name: "DEBUG reboot {{ software_index_label }}: {{ software_package_label }}"

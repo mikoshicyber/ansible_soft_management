@@ -171,7 +171,7 @@ class StateBatchTests(unittest.TestCase):
         self.assertIn('software_batch_copy is failed', fallback['when'])
         self.assertIn('software_batch_copy is skipped', fallback['when'])
         pkg = yaml.safe_load((ROOT / 'task_package.yaml').read_text())
-        retry = next(t for t in pkg if 'ansible.windows.win_command' in t)
+        retry = next(t for t in pkg if t.get('ansible.windows.win_powershell', {}).get('parameters', {}).get('Operation') == 'reapply')
         self.assertIn('timeout', retry)
         self.assertEqual(retry['retries'], 2)
         self.assertNotIn('async', retry)

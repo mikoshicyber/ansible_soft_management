@@ -14,7 +14,7 @@
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   register: software_next_state
   when: software_phase != 'done'
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "Save state atomically {{ software_index_label }}: {{ software_package_label }}"
@@ -30,7 +30,7 @@
       ExpectedContent: "{{ software_state_current.content_b64 }}"
       ExpectedExists: "{{ software_state_current.exists }}"
     error_action: stop
-  no_log: false
+  no_log: true
   when: software_candidate_database != software_database or not software_state_current.exists
   tags: [always]
 
@@ -42,7 +42,7 @@
       exists: true
       content_b64: "{{ (software_candidate_database | to_nice_json(indent=2, sort_keys=true, ensure_ascii=false) | b64encode) if (software_candidate_database != software_database or not software_state_current.exists) else software_state_current.content_b64 }}"
     software_database: "{{ software_candidate_database }}"
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "DEBUG state {{ software_index_label }}: {{ software_package_label }}"

@@ -771,10 +771,6 @@ def state_package_plan(op, catalog, source, dest, snapshot, cache_dir=None):
     op.update(artifact=artifact, verification='installer_result', installed={},
               cache_path=target(target(dest, '_src'), artifact['checksum'] + '/' + artifact['filename']))
     state_artifact_action(op)
-    if p['mode'] == 'msi' and op['action'] in ('install', 'upgrade'):
-        args = p.get('args') or []
-        command = subprocess.list2cmdline(['msiexec.exe', '/i', op['cache_path'], '/qn', '/norestart', '/L*v', op['cache_path'] + '.log', 'REINSTALL=ALL', 'REINSTALLMODE=vomus'])
-        op['msi_reinstall_command'] = command + (' ' + (args if isinstance(args, str) else subprocess.list2cmdline(args)) if args else '')
     return op
 
 

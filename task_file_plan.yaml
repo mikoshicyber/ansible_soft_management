@@ -11,7 +11,7 @@
     - software_item.pattern.mode == 'files'
     - software_item.pattern.template
     - software_item.pattern.state == 'present'
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "DEBUG file preparation {{ software_index_label }}: {{ software_package_label }}"
@@ -30,7 +30,7 @@
   register: software_file_snapshot
   when: software_file_hashes | length == 0 and software_item.inspection_paths | length > 0
   check_mode: false
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "Compare manifest {{ software_index_label }}: {{ software_package_label }}"
@@ -44,7 +44,7 @@
     ansible_connection: local
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   register: software_file_plan
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "Determine final file operation {{ software_index_label }}: {{ software_package_label }}"

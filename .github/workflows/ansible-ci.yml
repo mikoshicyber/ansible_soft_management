@@ -72,3 +72,17 @@ jobs:
         run: |
           set -euo pipefail
           python -m unittest discover -s tests -v
+  windows-process:
+    name: Validate installer process isolation
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Run installer process tests
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\tests\test_package_process.ps1

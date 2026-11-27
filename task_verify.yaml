@@ -10,7 +10,7 @@
       ProductIds: "{{ [software_item.pattern.product_id] if (software_item.pattern.product_id is defined and software_item.pattern.name is not defined and software_item.pattern.uninstall_name_regex is not defined) else [] }}"
     error_action: stop
   register: software_verify_snapshot
-  no_log: false
+  no_log: true
   check_mode: false
   when: software_item.pattern.state == 'absent'
   tags: [always]
@@ -30,5 +30,5 @@
     ansible_connection: local
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   register: software_verified
-  no_log: false
+  no_log: true
   tags: [always]

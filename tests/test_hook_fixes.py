@@ -76,7 +76,7 @@ class HookFixTests(unittest.TestCase):
         for task in self.hooks:
             self.assertEqual(self.env.from_string(task['timeout']).render(software_hook_timeout_seconds=120), 120)
         rescue = self.execute['rescue'][0]
-        for result, expected, timeout in [({'results': [{'failed': False, 'rc': 0}, {'failed': True, 'rc': 5, 'msg': 'non-zero return code', 'stdout': 'Access denied', 'software_command': {'kind': 'service'}}]}, 'rc=5; non-zero return code; Access denied', False), ({'results': [{'failed': True, 'timedout': {'period': 120}}]}, 'hook timeout (120 s)', True)]:
+        for result, expected, timeout in [({'results': [{'failed': False, 'rc': 0}, {'failed': True, 'rc': 5, 'msg': 'non-zero return code', 'stdout': 'Access denied', 'software_command': {'kind': 'service'}}]}, 'PRE; rc=5', False), ({'results': [{'failed': True, 'timedout': {'period': 120}}]}, 'hook timeout (120 s)', True)]:
             values = dict(ansible_failed_task={'name': 'PRE', 'action': 'ansible.windows.win_shell'}, ansible_failed_result=result, software_package_timeout_seconds=900, software_hook_timeout_seconds=120, software_results=[], software_item={'id': 'app', 'pattern': {'mode': 'exe'}}, software_action='upgrade')
             for key, value in rescue['vars'].items():
                 values[key] = self.env.from_string(value).render(**values)

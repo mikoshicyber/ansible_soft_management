@@ -11,7 +11,7 @@
     software_run_hooks: false
     software_run_pre: false
     software_action: "{{ software_item.action }}"
-  no_log: false
+  no_log: true
   tags: [always]
 
 - name: "DEBUG operation {{ software_index_label }}: {{ software_package_label }}"
@@ -61,14 +61,14 @@
             ansible_python_interpreter: "{{ ansible_playbook_python }}"
           register: software_prepared
           when: software_action == 'update_files' and software_item.pattern.mode == 'arc' and software_item.pattern.state == 'present'
-          no_log: false
+          no_log: true
           tags: [always]
 
         - name: "Use prepared archive files {{ software_index_label }}: {{ software_package_label }}"
           ansible.builtin.set_fact:
             software_effective_files: "{{ software_prepared.files }}"
           when: software_prepared.files is defined
-          no_log: false
+          no_log: true
           tags: [always]
 
         - name: "DEBUG preparation {{ software_index_label }}: {{ software_package_label }}"
@@ -101,7 +101,7 @@
           loop: "{{ software_item.pattern.pre_commands }}"
           loop_control:
             loop_var: software_command
-            label: "{{ software_command.command }}"
+            label: "{{ software_command.kind }}"
           register: software_pre_result
           timeout: "{{ software_hook_timeout_seconds | int }}"
           failed_when: >-
@@ -115,7 +115,7 @@
           when:
             - not ansible_check_mode
             - software_run_pre | bool
-          no_log: false
+          no_log: true
           tags: [always]
 
         - name: "Install or remove package {{ software_index_label }}: {{ software_package_label }}"
@@ -153,7 +153,7 @@
           loop: "{{ software_item.pattern.post_commands }}"
           loop_control:
             loop_var: software_command
-            label: "{{ software_command.command }}"
+            label: "{{ software_command.kind }}"
           register: software_post_result
           timeout: "{{ software_hook_timeout_seconds | int }}"
           failed_when: >-
@@ -165,7 +165,7 @@
             software_post_result.rc | default(-1) | int == 0 and
             not (software_command.kind == 'process' and software_post_result.stdout | default('') | trim == 'SOFTWARE_MANAGER_NO_PROCESS')
           when: software_run_hooks
-          no_log: false
+          no_log: true
           tags: [always]
 
         - name: "Verify package after execution {{ software_index_label }}: {{ software_package_label }}"
@@ -214,28 +214,35 @@
         software_failure: >-
           {{ (ansible_failed_result.results | default([]) | selectattr('failed', 'defined') | selectattr('failed') | list | first)
              | default(ansible_failed_result | default({})) }}
+        software_failed_package_task: >-
+          {{ (ansible_failed_task.action | default('')) in ['ansible.windows.win_powershell', 'win_powershell'] and
+             (ansible_failed_task.name | default('')) is search('^(Install or upgrade package|Reapply MSI|Remove package) ') }}
         software_failed_package_timeout: >-
-          {{ (ansible_failed_task.action | default('')) in
-             ['ansible.windows.win_package', 'win_package', 'ansible.windows.win_command', 'win_command']
-             and (ansible_failed_result.timedout is defined
-                  or ((ansible_failed_result.msg | default('') | string) is search('action failed to execute in the expected time frame', ignorecase=true))) }}
+          {{ software_failed_package_task | bool and
+             ((software_failure.result | default({})).timed_out | default(false) | bool or
+              ansible_failed_result.timedout is defined or
+              ((ansible_failed_result.msg | default('') | string) is search('action failed to execute in the expected time frame', ignorecase=true))) }}
         software_failed_hook_timeout: >-
           {{ (ansible_failed_task.action | default('')) in ['ansible.windows.win_shell', 'win_shell']
              and (software_failure.timedout is defined or ansible_failed_result.timedout is defined
                   or ((software_failure.msg | default(ansible_failed_result.msg | default('')) | string) is search('action failed to execute in the expected time frame', ignorecase=true))) }}
+        software_failure_has_rc: "{{ (software_failure.result | default({})).rc is defined or software_failure.rc is defined }}"
+        software_failure_rc: "{{ (software_failure.result | default({})).rc | default(software_failure.rc | default(-1)) | int }}"
         software_error_reason: >-
-          {{ ('package timeout (' ~ (software_package_timeout_seconds | string) ~ ' s)') if software_failed_package_timeout | bool else
+          {{ ('package timeout (' ~ (software_package_timeout_seconds | string) ~ ' s)' ~
+              ('; installer job terminated' if (software_failure.result | default({})).cleanup_confirmed | default(false) | bool else '; installer termination not confirmed')) if software_failed_package_timeout | bool else
              ('hook timeout (' ~ (software_hook_timeout_seconds | string) ~ ' s)') if software_failed_hook_timeout | bool else
              (ansible_failed_task.name | default('unknown')) ~
-             ('; rc=' ~ (software_failure.rc | string) if software_failure.rc is defined else '') ~
-             ('; ' ~ (software_failure.msg | default('') | string | truncate(300, true, '...')) if software_failure.msg | default('') else '') ~
-             ('; ' ~ ((software_failure.stderr | default('', true) or software_failure.stdout | default('', true)) | trim | truncate(300, true, '...'))
-              if (software_failure.software_command | default({})).kind | default('') in ['service', 'process'] and
-                 (software_failure.stderr | default('', true) or software_failure.stdout | default('', true)) else '') }}
+             ('; rc=' ~ (software_failure_rc | int | string) if software_failure_has_rc | bool else '') ~
+             ('; package execution failed' if software_failed_package_task | bool and not (software_failure_has_rc | bool) else '') ~
+             ('; stage=' ~ (software_failure.result.error_code | string) if software_failed_package_task | bool and (software_failure.result | default({})).error_code | default('') in ['initialize', 'arguments', 'checksum', 'signature', 'identity', 'uninstall_command', 'process'] else '') ~
+             ('; win32=' ~ (software_failure.result.native_error | int | string) if software_failed_package_task | bool and (software_failure.result | default({})).native_error is defined else '') ~
+             ('; Installed product not found' if (software_failure.msg | default('') | string) is search('^Installed product not found:') else '') }}
       ansible.builtin.set_fact:
         software_file_hashes: {}
-        software_reboot_deferred: "{{ (software_reboot_deferred | default(false)) or (software_failed_package_timeout | bool) or (software_failed_hook_timeout | bool) or ((ansible_failed_task.action | default('')) in ['ansible.windows.win_package', 'win_package', 'ansible.windows.win_command', 'win_command'] and (software_item.pattern.mode == 'msi' or (software_item.installed | default({})).provider | default('') == 'msi') and (software_failure.rc | default(-1) | int) == 1618) }}"
+        software_reboot_deferred: "{{ (software_reboot_deferred | default(false)) or (software_failed_package_timeout | bool) or (software_failed_hook_timeout | bool) or (software_failed_package_task | bool and (software_item.pattern.mode == 'msi' or (software_item.installed | default({})).provider | default('') == 'msi') and (software_failure_rc | default(-1, true) | int) == 1618) }}"
         software_results: "{{ software_results + [{'id': software_item.id, 'status': 'error', 'action': software_action, 'filename': (software_item.artifact | default({})).filename | default((software_item.installed | default({})).name | default(software_item.id), true), 'reason': software_error_reason, 'timed_out': (software_failed_package_timeout | bool or software_failed_hook_timeout | bool)}] }}"
+      no_log: true
       tags: [always]
 
     - name: "DEBUG error {{ software_index_label }}: {{ software_package_label }}"
