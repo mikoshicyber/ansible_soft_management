@@ -13,31 +13,35 @@
     ansible_connection: local
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
   register: software_next_state
+  when: software_phase != 'done'
   no_log: false
   tags: [always]
 
 - name: "Save state atomically {{ software_index_label }}: {{ software_package_label }}"
   vars:
     ansible_no_target_syslog: true
+    software_candidate_database: "{{ software_verified.database if software_phase == 'done' else software_next_state.database }}"
   ansible.windows.win_powershell:
     script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
     parameters:
       Operation: write
       StatePath: "{{ state_db }}"
-      Content: "{{ software_next_state.database | to_nice_json(indent=2, sort_keys=true, ensure_ascii=false) | b64encode }}"
+      Content: "{{ software_candidate_database | to_nice_json(indent=2, sort_keys=true, ensure_ascii=false) | b64encode }}"
       ExpectedContent: "{{ software_state_current.content_b64 }}"
       ExpectedExists: "{{ software_state_current.exists }}"
     error_action: stop
   no_log: false
-  when: software_next_state.database != software_database or not software_state_current.exists
+  when: software_candidate_database != software_database or not software_state_current.exists
   tags: [always]
 
 - name: "Synchronize in-memory state {{ software_index_label }}: {{ software_package_label }}"
+  vars:
+    software_candidate_database: "{{ software_verified.database if software_phase == 'done' else software_next_state.database }}"
   ansible.builtin.set_fact:
     software_state_current:
       exists: true
-      content_b64: "{{ (software_next_state.database | to_nice_json(indent=2, sort_keys=true, ensure_ascii=false) | b64encode) if (software_next_state.database != software_database or not software_state_current.exists) else software_state_current.content_b64 }}"
-    software_database: "{{ software_next_state.database }}"
+      content_b64: "{{ (software_candidate_database | to_nice_json(indent=2, sort_keys=true, ensure_ascii=false) | b64encode) if (software_candidate_database != software_database or not software_state_current.exists) else software_state_current.content_b64 }}"
+    software_database: "{{ software_candidate_database }}"
   no_log: false
   tags: [always]
 

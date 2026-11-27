@@ -124,9 +124,10 @@ class HookFixTests(unittest.TestCase):
 
     def test_checkpoint_and_debug_guards(self):
         post = next(t for t in self.tasks if t.get('vars', {}).get('software_phase') == 'post')
-        for action, mode, hooks, expected in [('install', 'exe', [], False), ('upgrade', 'msi', [], False), ('upgrade', 'exe', ['post'], True), ('update_files', 'arc', [], True), ('remove', 'msi', [], True)]:
-            args = dict(software_run_operation=True, software_action=action, software_item={'pattern': {'mode': mode, 'post': hooks}})
+        for action, mode, hooks, expected in [('install', 'exe', [], False), ('upgrade', 'msi', [], False), ('upgrade', 'exe', ['post'], True), ('update_files', 'arc', [], True), ('remove', 'msi', [], False), ('remove', 'msi', ['post'], True)]:
+            args = dict(software_run_operation=True, software_action=action, software_item_reboot=False, software_item={'pattern': {'mode': mode, 'post': hooks}})
             self.assertEqual(all(self.env.compile_expression(c)(**args) for c in post['when']), expected)
+        self.assertTrue(all(self.env.compile_expression(c)(software_run_operation=True, software_action='remove', software_item_reboot=True, software_item={'pattern': {'mode': 'msi', 'post': []}}) for c in post['when']))
         for file in [*ROOT.glob('task_*.yaml'), ROOT / 'telegram.yaml']:
             if '_v2' in file.name:
                 continue
@@ -138,7 +139,7 @@ class HookFixTests(unittest.TestCase):
                     self.assertTrue(cond(ansible_run_tags=['debug']))
         windows = yaml.safe_load((ROOT / 'task_windows.yaml').read_text())
         for task in windows:
-            if 'пакетную передачу' in task['name'] or 'пакетной передачи' in task['name'] or 'Передать установщики пакетом' in task['name']:
+            if 'batch installer transfer' in task['name'] or 'batch transfer' in task['name'] or 'Transfer installers in batch' in task['name']:
                 self.assertNotIn('artifact.filename', task['name'])
 
 

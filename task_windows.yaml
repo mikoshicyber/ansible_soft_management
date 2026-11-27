@@ -6,6 +6,9 @@
     software_results: []
     software_reboot_required: false
     software_reboot_deferred: false
+    software_file_hashes: {}
+    software_preflight_rendered: {}
+    software_cleanup_hashes: {}
   tags: [always]
 
 - name: DEBUG initialization
@@ -121,6 +124,9 @@
 - name: Build host-specific plan
   software_manager:
     operation: plan
+    timeouts:
+      package: "{{ software_package_timeout | default(900) }}"
+      hook: "{{ software_hook_timeout | default(120) }}"
     source: "{{ local_dir }}"
     dest: "{{ dest }}"
     patterns: "{{ software_patterns.patterns }}"
@@ -200,6 +206,75 @@
   when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
   tags: [never, debug]
 
+- name: Preflight managed files
+  when: software_plan.file_preflight.count | int > 0
+  block:
+    - name: Render initial managed-file template checksums
+      ansible.builtin.set_fact:
+        software_preflight_rendered: "{{ software_preflight_rendered | combine({software_item.id: (software_preflight_rendered[software_item.id] | default({})) | combine({software_file.path: software_rendered | hash('sha256')})}) }}"
+      vars:
+        software_index: "{{ software_preflight_template.index }}"
+        software_item: "{{ software_plan.operations[software_index | int] }}"
+        software_index_label: "Index {{ (software_index | int) + 1 }}/{{ software_plan.operations | length }}"
+        software_package_label: "{{ (software_item.artifact | default({})).filename | default((software_item.installed | default({})).name | default((software_item.old | default({})).filename | default(((software_item.pattern | default({})).files | default([]) | join(', ')), true), true), true) | default(software_item.id, true) }}"
+        software_file: "{{ software_preflight_template.file }}"
+        software_effective_files: "{{ software_item.files }}"
+        software_action: "{{ software_item.action }}"
+        software_rendered: "{{ lookup('ansible.builtin.template', software_file.source, convert_data=false) | string }}"
+      loop: "{{ software_plan.file_preflight.templates }}"
+      loop_control:
+        loop_var: software_preflight_template
+        label: "{{ software_file.path }}"
+      no_log: false
+      tags: [always]
+
+    - name: DEBUG initial template checksums
+      ansible.builtin.debug:
+        msg: "{{ software_preflight_rendered | length }}"
+      when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+      tags: [never, debug]
+
+    - name: Inspect initial managed files in batch
+      ansible.windows.win_powershell:
+        script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
+        parameters:
+          Operation: inspect_batch
+          Paths: "{{ software_plan.file_preflight.paths }}"
+        error_action: stop
+      register: software_preflight_snapshot
+      when: software_plan.file_preflight.paths | length > 0
+      check_mode: false
+      no_log: false
+      tags: [always]
+
+    - name: Exclude unchanged managed files from execution
+      software_manager:
+        operation: prune_files
+        operations: "{{ software_plan.operations }}"
+        snapshot: "{{ software_preflight_snapshot.result | default({}) }}"
+        rendered: "{{ software_preflight_rendered }}"
+      delegate_to: localhost
+      vars:
+        ansible_connection: local
+        ansible_python_interpreter: "{{ ansible_playbook_python }}"
+      register: software_preflight_result
+      no_log: false
+      tags: [always]
+
+    - name: DEBUG managed-file preflight
+      ansible.builtin.debug:
+        msg:
+          operations: "{{ software_preflight_result.execution_indices | length }}"
+          skipped: "{{ software_preflight_result.skipped | map(attribute='id') | list }}"
+      when: "'debug' in ansible_run_tags or 'never' in ansible_run_tags"
+      tags: [never, debug]
+
+  rescue:
+    - name: Managed-file preflight fallback
+      ansible.builtin.debug:
+        msg: 'WARNING: Managed-file preflight failed; checking files during individual operations.'
+      tags: [always]
+
 - name: "Prepare batch installer transfer ({{ software_plan.operations | selectattr('action', 'in', ['install', 'upgrade']) | list | length }} items)"
   software_manager:
     operation: stage_packages
@@ -256,18 +331,20 @@
     software_item: "{{ software_plan.operations[software_index] }}"
     software_index_label: "Index {{ software_index + 1 }}/{{ software_plan.operations | length }}"
     software_package_label: "{{ (software_item.artifact | default({})).filename | default((software_item.installed | default({})).name | default((software_item.old | default({})).filename | default(((software_item.pattern | default({})).files | default([]) | join(', ')), true), true), true) | default(software_item.id, true) }}"
-  loop: "{{ range(0, software_plan.operations | length) | list }}"
+  loop: "{{ (software_preflight_result | default({})).execution_indices | default(range(0, software_plan.operations | length) | list) }}"
   loop_control:
     loop_var: software_index
     label: "{{ software_index_label }}: {{ software_item.action }} {{ software_package_label }}"
   tags: [always]
 
-- name: Clean remaining empty installer cache directories
+- name: Clean confirmed installers and empty cache directories
   ansible.windows.win_powershell:
     script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
     parameters:
-      Operation: prune_cache
+      Operation: cleanup_packages
       ManagedRoot: "{{ dest }}"
+      Paths: "{{ software_cleanup_hashes.keys() | list }}"
+      ExpectedHashes: "{{ software_cleanup_hashes }}"
     error_action: stop
   when: not ansible_check_mode
   register: software_cache_cleanup
@@ -277,9 +354,10 @@
 - name: Installer cache cleanup warning
   ansible.builtin.debug:
     msg: >-
-      WARNING: Failed to fully clean empty installer cache directories.
+      WARNING: Failed to fully clean installer cache.
       {{ software_cache_cleanup.msg | default((software_cache_cleanup.error | default([]) | map(attribute='output', default='') | join(' ')), true) }}
-  when: software_cache_cleanup is failed
+      {{ software_cache_cleanup.warning | default([]) | join('; ') }}
+  when: software_cache_cleanup is failed or software_cache_cleanup.warning | default([]) | length > 0
   tags: [always]
 
 - name: DEBUG installer cache cleanup

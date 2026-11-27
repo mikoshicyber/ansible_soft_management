@@ -142,7 +142,7 @@ class PrePolicyTests(unittest.TestCase):
         snapshot = {'file': 'hash'}
         for enabled, force, pre in ((False, False, ['stop']), (True, False, ['stop']), (True, False, []), (False, True, [])):
             with self.subTest(enabled=enabled, force=force, pre=pre):
-                self.assertEqual(expr.render(software_run_pre=enabled, software_item={'pattern': {'force': force, 'pre': pre}}, software_file_snapshot={'result': snapshot}), {} if force or (enabled and pre) else snapshot)
+                self.assertEqual(expr.render(software_run_pre=enabled, software_item={'pattern': {'force': force, 'pre': pre}}, software_file_hashes=snapshot), {} if force or (enabled and pre) else snapshot)
 
 
 if __name__ == '__main__':

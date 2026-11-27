@@ -855,7 +855,10 @@ def stage_files(files, root, cache_dir, snapshot=None):
 def file_snapshot_value(snapshot, path):
     if path not in snapshot:
         raise SoftwareError('Missing file inspection result: ' + path)
-    return snapshot[path]
+    value = snapshot[path]
+    if isinstance(value, dict):
+        raise SoftwareError('File inspection failed: ' + path + ': ' + str(value.get('error', 'invalid inspection result')))
+    return value
 
 
 def plan_files(op, files, snapshot):
@@ -882,7 +885,10 @@ def plan_files(op, files, snapshot):
         action = 'adopt'
     else:
         action = 'skip'
-    return {'action': action, 'run_pre': action == 'update_files'}
+    run_pre = action == 'update_files'
+    if 'hook_timeout_seconds' in op:
+        validate_operation_timeouts(op, action, run_pre)
+    return {'action': action, 'run_pre': run_pre}
 
 
 def verify_files(op, files, snapshot):
@@ -907,7 +913,67 @@ def refresh_artifact_version(op):
     return record
 
 
-def make_plan(patterns, catalog, source, snapshot, db, dest, cache_dir=None):
+def timeout_value(value, name):
+    if not re.fullmatch(r'[0-9]+', str(value)) or not 5 <= int(value) <= 86400:
+        raise SoftwareError(name + ' must be an integer between 5 and 86400 seconds.')
+    return int(value)
+
+
+def validate_operation_timeouts(op, action, run_pre):
+    p = op['pattern']
+    if action in ('install', 'upgrade', 'remove'):
+        timeout_value(op['package_timeout_seconds'], 'package_timeout / software_package_timeout')
+    if (run_pre and p['pre']) or (action in ('install', 'upgrade', 'remove', 'update_files', 'recover') and p['post']):
+        timeout_value(op['hook_timeout_seconds'], 'hook_timeout / software_hook_timeout')
+
+
+def inspection_batches(operations):
+    paths = []
+    for op in reversed(operations):
+        if op['pattern']['mode'] not in ('files', 'arc'):
+            paths = []
+            continue
+        paths = list(dict.fromkeys([f['path'] for f in op['files'] + op['remove']] + paths))
+        op['inspection_paths'] = paths
+
+
+def file_preflight(operations):
+    count = 0
+    templates = []
+    for index, op in enumerate(operations):
+        p = op['pattern']
+        if p['mode'] not in ('arc', 'files'):
+            break
+        count += 1
+        if p['mode'] == 'files' and p['template'] and p['state'] == 'present':
+            templates.extend({'index': index, 'file': f} for f in op['files'])
+    return {'count': count, 'paths': operations[0]['inspection_paths'] if count else [], 'templates': templates}
+
+
+def prune_file_operations(operations, snapshot, rendered):
+    skipped = []
+    for op in operations:
+        p = op['pattern']
+        if p['mode'] not in ('arc', 'files'):
+            break
+        files = op['files']
+        if p['mode'] == 'files' and p['template'] and p['state'] == 'present':
+            checksums = rendered.get(op['id'], {})
+            if any(not re.fullmatch(r'[0-9a-f]{64}', str(checksums.get(f['path'], ''))) for f in files):
+                break
+            files = [dict(f, checksum=checksums[f['path']]) for f in files]
+        try:
+            decision = plan_files(op, files, snapshot)
+        except SoftwareError:
+            break
+        if decision['action'] != 'skip':
+            break
+        skipped.append({'id': op['id'], 'reason': 'already_current'})
+    return {'execution_indices': list(range(len(skipped), len(operations))), 'skipped': skipped}
+
+
+def make_plan(patterns, catalog, source, snapshot, db, dest, cache_dir=None, timeouts=None):
+    timeouts = timeouts or {}
     operations, skipped, errors, blocked, warnings = [], [], [], [], []
     state_refresh = {}
     owners = {}
@@ -944,7 +1010,7 @@ def make_plan(patterns, catalog, source, snapshot, db, dest, cache_dir=None):
                 if native_msi:
                     if p.get('product_id') and guid(p['product_id']):
                         op['msi_identity'] = {'product_id': p['product_id']}
-                    elif old.get('status') in ('installed', 'installer_reported', 'pending') and valid_msi_metadata(old.get('msi_metadata')) and not any(p.get(x) for x in ('product_id', 'name', 'uninstall_name_regex')):
+                    elif old.get('status') in ('installed', 'installer_reported', 'pending', 'absent') and valid_msi_metadata(old.get('msi_metadata')) and not any(p.get(x) for x in ('product_id', 'name', 'uninstall_name_regex')):
                         op['msi_identity'] = old['msi_metadata']
                 app = package_app(op, snapshot)
                 probe = snapshot.get('probes', {}).get(p.get('creates_path', ''), {})
@@ -965,6 +1031,9 @@ def make_plan(patterns, catalog, source, snapshot, db, dest, cache_dir=None):
                 for identity in identities:
                     package_owners[identity] = key
                 if not op.get('msi_identity') and not any(p.get(x) for x in ('name', 'product_id', 'uninstall_name_regex')):
+                    if not app and (not old or old.get('status') == 'absent'):
+                        skipped.append({'id': key, 'reason': 'no_removal_identity'})
+                        continue
                     raise SoftwareError('Removal requires registry identity')
                 if app:
                     if not app.get('product_id') or '\\' in app['product_id'] or '/' in app['product_id'] or app.get('probe_only') or sum(1 for entry in snapshot['installed'] if (entry.get('product_id') or '').casefold() == app['product_id'].casefold()) != 1:
@@ -973,7 +1042,7 @@ def make_plan(patterns, catalog, source, snapshot, db, dest, cache_dir=None):
                         raise SoftwareError('Explicit silent uninstall arguments required')
                     op['action'] = 'remove'
                 else:
-                    op['action'] = 'recover' if old.get('status') == 'pending' else ('forget' if old else 'skip')
+                    op['action'] = 'recover' if old.get('status') == 'pending' else ('forget' if old and old.get('status') != 'absent' else 'skip')
             elif p['state'] == 'present':
                 if p['mode'] == 'arc':
                     op['artifact'] = select_artifact(p, catalog, source, cache_dir=cache_dir)
@@ -1014,6 +1083,10 @@ def make_plan(patterns, catalog, source, snapshot, db, dest, cache_dir=None):
                 if any(inside(path, other) or inside(other, path) for other in owners):
                     raise SoftwareError('Overlapping managed paths')
                 owners[path] = key
+            if p['mode'] in ('exe', 'msi'):
+                op['run_pre'] = op['action'] in ('install', 'upgrade', 'remove')
+            op['package_timeout_seconds'] = p.get('package_timeout', timeouts.get('package', 900))
+            op['hook_timeout_seconds'] = p.get('hook_timeout', timeouts.get('hook', 120))
             if p['mode'] in ('exe', 'msi') and op['artifact']:
                 path = op['artifact']['checksum']
                 if path in artifact_owners and artifact_owners[path] != key:
@@ -1021,7 +1094,11 @@ def make_plan(patterns, catalog, source, snapshot, db, dest, cache_dir=None):
                     continue
                 artifact_owners[path] = key
             if p['mode'] in ('exe', 'msi'):
-                op['run_pre'] = op['action'] in ('install', 'upgrade', 'remove')
+                try:
+                    validate_operation_timeouts(op, op['action'], op.get('run_pre', False))
+                except SoftwareError as exc:
+                    blocked.append({'id': key, 'filename': op['artifact'].get('filename', op.get('installed', {}).get('name', key)), 'status': 'error', 'action': 'plan', 'reason': str(exc)})
+                    continue
             if op.get('warning'):
                 warnings.append({'id': key, 'filename': op['artifact']['filename'], 'status': 'warning', 'action': op['action'], 'reason': op['warning']})
             if op['action'] == 'skip':
@@ -1039,7 +1116,8 @@ def make_plan(patterns, catalog, source, snapshot, db, dest, cache_dir=None):
                 blocked.append({'id': key, 'filename': op.get('artifact', {}).get('filename', key), 'status': 'error', 'action': 'plan', 'reason': str(exc)})
             else:
                 errors.append({'id': key, 'reason': str(exc)})
-    return {'operations': operations, 'skipped': skipped, 'errors': errors, 'blocked': blocked, 'warnings': warnings, 'state_refresh': state_refresh}
+    inspection_batches(operations)
+    return {'operations': operations, 'skipped': skipped, 'errors': errors, 'blocked': blocked, 'warnings': warnings, 'state_refresh': state_refresh, 'file_preflight': file_preflight(operations)}
 
 
 def prepare(op, source, cache_dir=None):
@@ -1150,6 +1228,8 @@ def transition(db, op, phase, files, reboot=False, verified=None):
     if phase == 'done' and p['state'] == 'absent':
         if p['mode'] == 'arc' and not p['files']:
             result['products'][key] = {'status': 'absent', 'mode': 'arc', 'files': op['remove']}
+        elif p['mode'] == 'msi' and valid_msi_metadata(op.get('msi_identity')):
+            result['products'][key] = {'status': 'absent', 'mode': 'msi', 'msi_metadata': op['msi_identity']}
         else:
             result['products'].pop(key, None)
     elif phase in ('pending', 'post'):

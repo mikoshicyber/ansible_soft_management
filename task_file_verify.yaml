@@ -14,6 +14,9 @@
 - name: "Validate manifest {{ software_index_label }}: {{ software_package_label }}"
   software_manager:
     operation: verify_files
+    phase: done
+    state: "{{ software_database }}"
+    reboot: "{{ software_item_reboot }}"
     item: "{{ software_item }}"
     files: "{{ software_effective_files }}"
     snapshot: "{{ software_files_verified.result }}"
@@ -21,5 +24,6 @@
   vars:
     ansible_connection: local
     ansible_python_interpreter: "{{ ansible_playbook_python }}"
+  register: software_verified
   no_log: false
   tags: [always]

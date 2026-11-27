@@ -1,4 +1,5 @@
 import re
+import sys
 import unittest
 from pathlib import Path
 
@@ -8,6 +9,8 @@ from jinja2.nativetypes import NativeEnvironment
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'module_utils'))
+import software_core as core
 
 
 def load(name):
@@ -39,13 +42,13 @@ class PackageTimeoutTests(unittest.TestCase):
         self.assertEqual(self.timeout({'package_timeout': 1800}, software_package_timeout=600), 1800)
 
     def test_timeout_validation(self):
-        checks = self.execute['block'][0]['ansible.builtin.assert']['that']
         for value in [5, 900, 86400, '600']:
             with self.subTest(value=value):
-                self.assertTrue(all(self.env.compile_expression(expr)(software_package_timeout_seconds=value) for expr in checks))
+                self.assertEqual(core.timeout_value(value, 'timeout'), int(value))
         for value in [0, -1, 4, 86401, False, True, 0.5, 'abc', '900.5', None, '']:
             with self.subTest(value=value):
-                self.assertFalse(all(self.env.compile_expression(expr)(software_package_timeout_seconds=value) for expr in checks))
+                with self.assertRaises(core.SoftwareError):
+                    core.timeout_value(value, 'timeout')
 
     def test_install_remove_are_bounded(self):
         tasks = [task for task in self.package if 'ansible.windows.win_package' in task]

@@ -14,7 +14,7 @@
     files: "{{ software_effective_files | rejectattr('content_b64', 'defined') | list }}"
     dest: "{{ software_item.pattern.root }}"
     cache_dir: "{{ hostvars['localhost'].software_catalog.cache_dir }}"
-    snapshot: "{{ {} if ((software_run_pre | bool and software_item.pattern.pre | length > 0) or software_item.pattern.force) else software_file_snapshot.result }}"
+    snapshot: "{{ {} if ((software_run_pre | bool and software_item.pattern.pre | length > 0) or software_item.pattern.force) else software_file_hashes }}"
   delegate_to: localhost
   vars:
     ansible_connection: local

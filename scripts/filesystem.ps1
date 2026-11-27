@@ -1,5 +1,5 @@
 param(
-    [Parameter(Mandatory=$true)][ValidateSet('inspect','read','write','remove','guard','template','prune_cache','cleanup_package')][string]$Operation,
+    [Parameter(Mandatory=$true)][ValidateSet('inspect','inspect_batch','read','write','remove','guard','template','prune_cache','cleanup_package','cleanup_packages')][string]$Operation,
     [string[]]$Paths = @(),
     [string]$StatePath,
     [string]$Content,
@@ -72,6 +72,23 @@ function Remove-EmptyCacheDirectories([string]$ManagedRoot, [string[]]$Paths) {
     }
 }
 
+function Remove-CachedInstaller([string]$Path) {
+    $managed = Get-SafePath ($ManagedRoot.Replace('/', '\').TrimEnd('\'))
+    $root = Get-SafePath ([IO.Path]::Combine($managed, '_src'))
+    $full = Get-SafeFile $Path
+    $directory = [IO.Path]::GetDirectoryName($full)
+    if (-not ([IO.Path]::GetDirectoryName($directory)).Equals($root, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($directory) -notmatch '^[0-9a-f]{64}$') { throw 'Expected a file in a SHA-256 cache directory' }
+    if ($full.StartsWith($env:SystemRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Deletion inside Windows system directory is forbidden' }
+    if (-not $ExpectedHashes.ContainsKey($Path) -or $ExpectedHashes[$Path] -ne [IO.Path]::GetFileName($directory)) { throw 'Expected installer hash does not match cache directory' }
+    $log = if ([IO.Path]::GetExtension($full) -eq '.msi') { Get-SafeFile ($full + '.log') } else { $null }
+    if ([IO.File]::Exists($full)) {
+        if ((Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash -ne $ExpectedHashes[$Path]) { throw 'Cached installer has changed' }
+        [IO.File]::Delete($full)
+        $Ansible.Changed = $true
+    }
+    if ($null -ne $log -and [IO.File]::Exists($log)) { [IO.File]::Delete($log); $Ansible.Changed = $true }
+}
+
 switch ($Operation) {
     'guard' {
         foreach ($path in $Paths) { $null = Get-SafeFile $path }
@@ -83,6 +100,18 @@ switch ($Operation) {
             if ([IO.File]::Exists($full)) {
                 $result[$path] = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
             } else { $result[$path] = $null }
+        }
+        $Ansible.Result = $result
+    }
+    'inspect_batch' {
+        $result = @{}
+        foreach ($path in $Paths) {
+            try {
+                $full = Get-SafeFile $path
+                if ([IO.File]::Exists($full)) {
+                    $result[$path] = (Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash.ToLowerInvariant()
+                } else { $result[$path] = $null }
+            } catch { $result[$path] = @{ error = $_.Exception.Message } }
         }
         $Ansible.Result = $result
     }
@@ -151,20 +180,15 @@ switch ($Operation) {
     'prune_cache' { Remove-EmptyCacheDirectories $ManagedRoot $Paths }
     'cleanup_package' {
         if ($Paths.Count -ne 1) { throw 'Expected one cached installer' }
-        $managed = Get-SafePath ($ManagedRoot.Replace('/', '\').TrimEnd('\'))
-        $root = Get-SafePath ([IO.Path]::Combine($managed, '_src'))
-        $full = Get-SafeFile $Paths[0]
-        $directory = [IO.Path]::GetDirectoryName($full)
-        if (-not ([IO.Path]::GetDirectoryName($directory)).Equals($root, [StringComparison]::OrdinalIgnoreCase) -or [IO.Path]::GetFileName($directory) -notmatch '^[0-9a-f]{64}$') { throw 'Expected a file in a SHA-256 cache directory' }
-        if ($full.StartsWith($env:SystemRoot.TrimEnd('\') + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Deletion inside Windows system directory is forbidden' }
-        if (-not $ExpectedHashes.ContainsKey($Paths[0]) -or $ExpectedHashes[$Paths[0]] -ne [IO.Path]::GetFileName($directory)) { throw 'Expected installer hash does not match cache directory' }
-        $log = if ([IO.Path]::GetExtension($full) -eq '.msi') { Get-SafeFile ($full + '.log') } else { $null }
-        if ([IO.File]::Exists($full)) {
-            if ((Get-FileHash -LiteralPath $full -Algorithm SHA256).Hash -ne $ExpectedHashes[$Paths[0]]) { throw 'Cached installer has changed' }
-            [IO.File]::Delete($full)
-            $Ansible.Changed = $true
-        }
-        if ($null -ne $log -and [IO.File]::Exists($log)) { [IO.File]::Delete($log); $Ansible.Changed = $true }
+        Remove-CachedInstaller $Paths[0]
         Remove-EmptyCacheDirectories $ManagedRoot $Paths
+    }
+    'cleanup_packages' {
+        foreach ($path in $Paths) {
+            try { Remove-CachedInstaller $path }
+            catch { Write-Warning ("$path : " + $_.Exception.Message) }
+        }
+        try { Remove-EmptyCacheDirectories $ManagedRoot @() }
+        catch { Write-Warning $_.Exception.Message }
     }
 }

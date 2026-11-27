@@ -18,7 +18,11 @@
 - name: "Verify package result {{ software_index_label }}: {{ software_package_label }}"
   software_manager:
     operation: verify
+    phase: done
+    state: "{{ software_database }}"
+    reboot: "{{ software_item_reboot }}"
     item: "{{ software_item }}"
+    files: "{{ software_effective_files }}"
     snapshot: "{{ software_verify_snapshot.result | default({}) }}"
     receipt: "{{ software_pkg_install if software_action != 'recover' else {} }}"
   delegate_to: localhost

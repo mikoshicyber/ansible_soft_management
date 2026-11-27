@@ -102,13 +102,37 @@ class SoftwareTests(unittest.TestCase):
         self.assertEqual(plan['operations'][0]['action'], 'upgrade')
         self.assertFalse(plan['warnings'])
 
-    def test_legacy_remove_and_missing_are_independent_errors(self):
+    def test_legacy_remove_skip_and_missing_artifact_error_are_independent(self):
         self.artifact('app-1.2.exe')
         plan = self.plan([self.legacy_package(state='absent'), {'regex': 'missing', 'mode': 'msi'}, self.package(regex=r'app-.+\.exe$')])
         self.assertFalse(plan['errors'])
-        self.assertEqual(len(plan['blocked']), 2)
-        self.assertTrue(all(x['status'] == 'error' for x in plan['blocked']))
+        self.assertEqual(len(plan['blocked']), 1)
+        self.assertEqual(plan['blocked'][0]['status'], 'error')
+        self.assertEqual(plan['skipped'], [{'id': self.legacy_package()['regex'], 'reason': 'no_removal_identity'}])
         self.assertEqual(len(plan['operations']), 1)
+
+    def test_unidentified_removal_skips_only_without_active_state_or_probe(self):
+        for mode in ('exe', 'msi'):
+            pattern = {'id': 'unknown', 'regex': r'app-.*\.' + mode + '$', 'mode': mode, 'state': 'absent', 'force': True}
+            with self.subTest(mode=mode):
+                for snapshot in (self.snap, self.installed()):
+                    plan = self.plan([pattern], snapshot)
+                    self.assertFalse(plan['operations'] or plan['blocked'] or plan['warnings'] or plan['errors'])
+                    self.assertEqual(plan['skipped'], [{'id': 'unknown', 'reason': 'no_removal_identity'}])
+                for status in ('installed', 'installer_reported', 'pending'):
+                    db = {'schema_version': 2, 'products': {'unknown': {'status': status}}}
+                    self.assertIn('Removal requires registry identity', self.plan([pattern], db=db)['blocked'][0]['reason'])
+                path = r'C:\Apps\app.exe'
+                plan = self.plan([dict(pattern, creates_path=path)], {'installed': [], 'probes': {path: {'exists': True}}})
+                self.assertIn('Removal requires registry identity', plan['blocked'][0]['reason'])
+
+    def test_missing_nextcloud_packages_are_silent(self):
+        patterns = [{'regex': regex, 'state': 'absent', 'mode': 'msi'}
+                    for regex in ('Nextcloud-.*-x64.msi', 'Nextcloud.Talk-windows-x64.msi')]
+        plan = self.plan(patterns, {'installed': [], 'probes': {}, 'msi_metadata': {}})
+        self.assertFalse(plan['operations'] or plan['blocked'] or plan['warnings'] or plan['errors'])
+        self.assertEqual(len(plan['skipped']), 2)
+        self.assertTrue(all(item['reason'] == 'no_removal_identity' for item in plan['skipped']))
 
     def test_legacy_receipt_rejects_failed_skipped_or_nochange(self):
         self.artifact('app-1.2.exe')

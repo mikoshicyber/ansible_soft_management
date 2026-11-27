@@ -1,5 +1,5 @@
 ---
-- name: Проверить отправку отчёта в Telegram
+- name: Test Telegram report delivery
   hosts: localhost
   connection: local
   gather_facts: false
@@ -8,18 +8,17 @@
     software_catalog:
       catalog: []
     software_metadata_only: false
-
   tasks:
-    - name: Сформировать и отправить тестовый отчёт
+    - name: Generate and send test report
       ansible.builtin.include_tasks: telegram.yaml
       tags: [always]
 
-    - name: Проверить успешность отправки
+    - name: Verify successful delivery
       ansible.builtin.assert:
         that:
           - software_telegram_result is defined
           - software_telegram_result is not skipped
           - software_telegram_result is succeeded
-        fail_msg: "Telegram: отправка не выполнена или завершилась ошибкой."
-        success_msg: "Telegram: тестовый отчёт успешно отправлен."
+        fail_msg: "Telegram: delivery was skipped or failed."
+        success_msg: "Telegram: test report sent successfully."
       tags: [always]

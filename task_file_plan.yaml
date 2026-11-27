@@ -24,10 +24,11 @@
   ansible.windows.win_powershell:
     script: "{{ lookup('ansible.builtin.file', playbook_dir ~ '/scripts/filesystem.ps1', rstrip=false) }}"
     parameters:
-      Operation: inspect
-      Paths: "{{ (software_effective_files + software_item.remove) | map(attribute='path') | list | unique | list }}"
+      Operation: inspect_batch
+      Paths: "{{ software_item.inspection_paths }}"
     error_action: stop
   register: software_file_snapshot
+  when: software_file_hashes | length == 0 and software_item.inspection_paths | length > 0
   check_mode: false
   no_log: false
   tags: [always]
@@ -37,7 +38,7 @@
     operation: plan_files
     item: "{{ software_item }}"
     files: "{{ software_effective_files }}"
-    snapshot: "{{ software_file_snapshot.result }}"
+    snapshot: "{{ software_file_hashes if software_file_hashes | length > 0 else software_file_snapshot.result | default({}) }}"
   delegate_to: localhost
   vars:
     ansible_connection: local
@@ -49,6 +50,11 @@
 - name: "Determine final file operation {{ software_index_label }}: {{ software_package_label }}"
   ansible.builtin.set_fact:
     software_action: "{{ software_file_plan.action }}"
+    software_run_operation: "{{ software_file_plan.action == 'update_files' }}"
+    software_run_hooks: "{{ software_file_plan.action in ['update_files', 'recover'] }}"
+    software_run_pre: "{{ software_file_plan.run_pre | bool }}"
+    software_file_hashes: "{{ software_file_hashes if software_file_hashes | length > 0 else software_file_snapshot.result | default({}) }}"
+  changed_when: ansible_check_mode and software_file_plan.action in ['update_files', 'recover']
   tags: [always]
 
 - name: "DEBUG file operation result {{ software_index_label }}: {{ software_package_label }}"

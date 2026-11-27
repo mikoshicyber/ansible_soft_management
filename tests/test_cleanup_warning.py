@@ -24,7 +24,7 @@ class CleanupWarningTests(unittest.TestCase):
         cleanup, warning = tasks[index:index + 2]
         self.assertIs(cleanup['ignore_errors'], True)
         self.assertEqual(cleanup['register'], expected_register)
-        self.assertEqual(warning['when'], expected_register + ' is failed')
+        self.assertIn(expected_register + ' is failed', warning['when'])
         self.assertEqual(warning['tags'], ['always'])
         self.assertNotIn('ansible.builtin.set_fact', warning)
         self.assertNotIn('software_results', str(warning))
@@ -42,21 +42,23 @@ class CleanupWarningTests(unittest.TestCase):
     def test_installer_cleanup_is_nonfatal_after_state_commit(self):
         tasks = self.execution['block']
         done = next(i for i, task in enumerate(tasks) if task.get('vars', {}).get('software_phase') == 'done')
-        cleanup = next(i for i, task in enumerate(tasks) if task.get('ansible.windows.win_powershell', {}).get('parameters', {}).get('Operation') == 'cleanup_package')
-        self.assertLess(done, cleanup)
-        self.assertIn("software_action in ['install', 'upgrade', 'recover']", tasks[cleanup]['when'])
-        self.assertIn('ExpectedHashes', tasks[cleanup]['ansible.windows.win_powershell']['parameters'])
-        self.assertIn('not ansible_check_mode', self.execution['when'])
-        self.check_warning(tasks, cleanup, 'software_package_cleanup')
         result = next(task for task in self.operation['block'] if 'software_results' in task.get('ansible.builtin.set_fact', {}))
-        self.assertIn('software_results', result['ansible.builtin.set_fact'])
-        self.assertNotIn('software_package_cleanup', str(result))
+        self.assertIn('software_cleanup_hashes', result['ansible.builtin.set_fact'])
+        self.assertIn("software_action in ['install', 'upgrade', 'recover']", result['ansible.builtin.set_fact']['software_cleanup_hashes'])
+        self.assertLess(self.operation['block'].index(self.execution), self.operation['block'].index(result))
+        self.assertIn('not ansible_check_mode', self.execution['when'])
+        self.assertNotIn('software_cleanup_hashes', str(self.operation['rescue']))
+        self.assertNotIn('software_cache_cleanup', str(result))
 
     def test_empty_cache_cleanup(self):
         tasks = load('task_windows.yaml')
-        index = next(i for i, task in enumerate(tasks) if task.get('ansible.windows.win_powershell', {}).get('parameters', {}).get('Operation') == 'prune_cache')
+        index = next(i for i, task in enumerate(tasks) if task.get('ansible.windows.win_powershell', {}).get('parameters', {}).get('Operation') == 'cleanup_packages')
         self.assertEqual(tasks[index]['when'], 'not ansible_check_mode')
         self.check_warning(tasks, index, 'software_cache_cleanup')
+        warning = tasks[index + 1]
+        result = {'warning': ['File locked']}
+        self.assertTrue(self.env.compile_expression(warning['when'])(software_cache_cleanup=result))
+        self.assertIn('File locked', self.env.from_string(warning['ansible.builtin.debug']['msg']).render(software_cache_cleanup=result))
 
     def test_controller_extraction_cleanup(self):
         tasks = self.operation['always']

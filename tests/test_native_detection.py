@@ -136,7 +136,38 @@ class NativeDetectionTests(unittest.TestCase):
         self.assertEqual(remove['action'], 'remove')
         self.assertEqual(remove['installed']['product_id'], self.new_code)
         c.verify_package(remove, self.snapshot(metadata))
-        self.assertIn('Removal requires', self.plan(snap, pattern=self.pattern(state='absent'))['blocked'][0]['reason'])
+        unknown = self.plan(snap, pattern=self.pattern(state='absent'))
+        self.assertFalse(unknown['operations'] or unknown['blocked'] or unknown['warnings'])
+        self.assertEqual(unknown['skipped'], [{'id': 'app', 'reason': 'no_removal_identity'}])
+
+    def test_removal_retains_msi_identity_and_rechecks_on_next_run(self):
+        absent = self.pattern(state='absent')
+        metadata = self.msi()
+        db = {'schema_version': 2, 'products': {'app': {'status': 'installer_reported', 'msi_metadata': metadata}}}
+        remove = self.plan(self.snapshot({}, [self.app(self.new_code)]), db, absent)['operations'][0]
+        empty = self.snapshot({})
+        verified = c.verify_package(remove, empty)
+        db = c.transition(db, remove, 'done', [], verified=verified)
+        self.assertEqual(db['products']['app'], {'status': 'absent', 'mode': 'msi', 'msi_metadata': metadata})
+        patterns = c.merge([{'patterns': [absent]}], self.dest)
+        self.assertEqual(c.discover_msi(patterns, [], str(self.source), db)['identities'], {'app:stored': metadata})
+        plan = self.plan(empty, db, absent)
+        self.assertFalse(plan['operations'] or plan['blocked'] or plan['warnings'] or plan['errors'])
+        self.assertEqual(plan['skipped'][0]['id'], 'app')
+        self.assertEqual(self.plan(self.snapshot({}, [self.app()]), db, absent)['operations'][0]['action'], 'remove')
+        self.assertTrue(self.plan(self.snapshot({}, states={self.new_code.casefold(): 2}), db, absent)['blocked'])
+        _, checksum = self.artifact('app.msi', b'new')
+        self.assertEqual(self.plan(self.snapshot({checksum: metadata}), db)['operations'][0]['action'], 'install')
+
+    def test_already_absent_msi_with_stored_identity_retains_identity_on_forget(self):
+        metadata = self.msi()
+        db = {'schema_version': 2, 'products': {'app': {'status': 'installer_reported', 'msi_metadata': metadata}}}
+        empty = self.snapshot({})
+        op = self.plan(empty, db, self.pattern(state='absent'))['operations'][0]
+        self.assertEqual(op['action'], 'forget')
+        db = c.transition(db, op, 'done', [], verified=c.verify_package(op, empty))
+        self.assertEqual(db['products']['app']['msi_metadata'], metadata)
+        self.assertFalse(self.plan(empty, db, self.pattern(state='absent'))['operations'])
 
     def test_local_metadata_shared_cache_and_legacy_state(self):
         path, checksum = self.artifact('app.msi', b'new')
