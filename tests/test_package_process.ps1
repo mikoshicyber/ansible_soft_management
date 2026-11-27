@@ -89,8 +89,12 @@ public static class TestInstaller {
     $Ansible = @{ Changed = $false; Failed = $false; Result = @{} }
     & $runner -ProcessSource $source -Operation install -Provider registry -TimeoutSeconds 5 -Path $exe -Checksum $hash -Arguments @('sleep')
     Assert-True ($Ansible.Failed -and $Ansible.Result.timed_out -and $Ansible.Result.cleanup_confirmed) 'PowerShell timeout receipt invalid'
-    $null = New-Item -Path $registry
-    $null = New-ItemProperty -LiteralPath $registry -Name QuietUninstallString -Value ('"' + $exe + '" exit 0')
+    [Microsoft.Win32.Registry]::SetValue(
+        $registry.Replace('HKCU:', 'HKEY_CURRENT_USER'),
+        'QuietUninstallString',
+        ('"' + $exe + '" exit 0'),
+        [Microsoft.Win32.RegistryValueKind]::String
+    )
     $Ansible = @{ Changed = $false; Failed = $false; Result = @{} }
     & $runner -ProcessSource $source -Operation remove -Provider registry -TimeoutSeconds 5 -ProductId (Split-Path -Leaf $registry)
     Assert-True (-not $Ansible.Failed -and $Ansible.Changed -and $Ansible.Result.rc -eq 0) 'Registry uninstall failed'
